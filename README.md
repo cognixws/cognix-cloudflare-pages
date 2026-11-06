@@ -3,7 +3,7 @@
 An independently maintained [PiCode](https://github.com/cognixws/picode) extension
 for static artifact versions. Requires PiCode
 with ADR-0249 and Node.js 24 (built-in SQLite). In PiCode, open **Extensions → Install extension**, paste
-`https://github.com/cognixws/picode-cloudflare-pages`, review and install; no npm install or build runs during installation. Open Configuration, enter account ID and an API token with Cloudflare Pages Edit
+`https://github.com/cognixws/cognix-cloudflare-pages`, review and install; no npm install or build runs during installation. Open Configuration, enter account ID and an API token with Cloudflare Pages Edit
 and — for Web Analytics — Account Settings Read and Write, and save. Open Publications and choose Check connection. The read-only account
 check verifies project-list access, not write permission. Then open an artifact's
 Actions → Publish to Cloudflare Pages; its exact version is selected. A custom
