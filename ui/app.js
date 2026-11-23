@@ -549,7 +549,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   <header class="topbar"><h1>Sites</h1></header>
   <div class="state-box">
    <h2>Sites could not start</h2>
-   <p class="muted">COGNIX[WS] did not finish opening this page; Try again reloads it.</p>
+   <p class="muted">COGNIX[WS] did not finish opening this page. Try again reloads it.</p>
    <div class="row state-actions" data-align-row data-align-wrap>
     <button type="button" class="primary" data-action="restart">Try again</button>
    </div>
