@@ -123,10 +123,10 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
          <span class="field-label">Allowed email addresses</span>
          <input id="${s}-emails" type="text" placeholder="you@company.com, teammate@company.com" value="${b(I)}">
         </label>
-        ${z?'<p class="muted small">Cloudflare Access one-time PIN login is verified for this account.</p>':`<div class="banner warn" role="status">
+        ${z?'<p class="muted small">Cloudflare Access one-time PIN login is verified for this account.</p>':`<div class="row spread" role="status">
               <div class="banner-copy">
                <span class="banner-title">Restricted access needs setup</span>
-               <span class="muted">${b(k?.message||"Save a Cloudflare Access API token in Settings and verify One-time PIN login.")}</span>
+               <span class="muted small">${b(k?.message||"Save a Cloudflare Access API token in Settings and verify One-time PIN login.")}</span>
               </div>
               <div class="row" data-align-row data-align-wrap>
                ${k?.status==="not-configured"||k?.settingsRequired?'<button type="button" data-sync="settings">Open settings</button>':`<button type="button" data-action="access-setup" ${A?"disabled":""}>${A==="access-setup"?"Checking\u2026":"Check setup"}</button>`}
@@ -267,7 +267,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
   </div>`}function xp(){let s=(c?.publications||[]).find(z=>z.id===J);if(!s)return l="list",mu();let g=s.operations?.find(z=>ti.has(z.status)),I=g||s.operations?.[0],k=we()&&!s.otherAccount&&!g&&!A;return`<div class="shell">
    <header class="topbar">
     <div class="row" data-align-row data-align-wrap>
-     <button type="button" class="ghost" data-action="nav-list">\u2190 Sites</button>
+     <button type="button" data-action="nav-list">All sites</button>
     </div>
     <div class="row" data-align-row data-align-wrap>
      ${s.artifact_id?`<button type="button" data-sync="artifact" data-id="${b(s.artifact_id)}">Open artifact</button>`:""}
@@ -306,39 +306,43 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
      <p class="muted detail-url" style="margin-top:6px">${b(s.url||s.project+".pages.dev")}</p>
     </div>
 
-    ${g&&g.status==="unknown"?`<div class="panel-section">
-          <div class="banner warn" role="status">
-           <div class="banner-copy">
-            <span class="banner-title">Delivery check needed</span>
-            <span class="muted">${b(g.error||"Cloudflare did not confirm the last step; check the result before starting another change.")}</span>
-           </div>
-           <div class="row" data-align-row data-align-wrap>
-            <button type="button" class="primary" data-action="check-op" data-id="${b(g.id)}" ${A?"disabled":""}>Check result</button>
-           </div>
+    ${g&&g.status==="unknown"?`<div class="panel-section row spread" role="status">
+          <div class="banner-copy">
+           <span class="banner-title">Delivery check needed</span>
+           <span class="muted small">${b(g.error||"Cloudflare did not confirm the last step; check the result before starting another change.")}</span>
           </div>
-         </div>`:g&&g.status==="prepared"?`<div class="panel-section">
-            <div class="banner" role="status">
-             <div class="banner-copy">
-              <span class="banner-title">Confirmation pending</span>
-              <span class="muted">Confirm or cancel the prepared change to continue.</span>
-             </div>
-             <div class="row" data-align-row data-align-wrap>
-              <button type="button" data-action="cancel-op" data-id="${b(g.id)}" ${A?"disabled":""}>Cancel</button>
-              <button type="button" class="primary" data-action="confirm-op" data-id="${b(g.id)}" ${A?"disabled":""}>Review change</button>
-             </div>
+          <div class="row" data-align-row data-align-wrap>
+           <button type="button" class="primary" data-action="check-op" data-id="${b(g.id)}" ${A?"disabled":""}>Check result</button>
+          </div>
+         </div>`:g&&g.status==="prepared"?`<div class="panel-section row spread" role="status">
+            <div class="banner-copy">
+             <span class="banner-title">Confirmation pending</span>
+             <span class="muted small">Confirm or cancel the prepared change to continue.</span>
             </div>
-           </div>`:g?`<div class="panel-section">${du(g)}</div>`:I?.status==="failed"&&I.error?`<div class="panel-section">
-                <div class="banner danger" role="alert">
-                 <div class="banner-copy">
-                  <span class="banner-title">Last operation failed</span>
-                  <span class="muted">${b(I.error)}</span>
-                 </div>
-                 ${s.artifact_id&&k?`<div class="row" data-align-row data-align-wrap>
-                       <button type="button" data-action="open-review" data-id="${b(s.artifact_id)}" data-version="${s.latestVersion||s.version||1}">Review again</button>
-                      </div>`:""}
+            <div class="row" data-align-row data-align-wrap>
+             <button type="button" data-action="cancel-op" data-id="${b(g.id)}" ${A?"disabled":""}>Cancel</button>
+             <button type="button" class="primary" data-action="confirm-op" data-id="${b(g.id)}" ${A?"disabled":""}>Review change</button>
+            </div>
+           </div>`:g?`<div class="panel-section">${du(g)}</div>`:I?.status==="failed"&&I.error?`<div class="panel-section row spread" role="alert">
+                <div class="banner-copy">
+                 <span class="banner-title">Last operation failed</span>
+                 <span class="muted small">${b(I.error)}</span>
                 </div>
+                ${s.artifact_id&&k?`<div class="row" data-align-row data-align-wrap>
+                      <button type="button" data-action="open-review" data-id="${b(s.artifact_id)}" data-version="${s.latestVersion||s.version||1}">Review again</button>
+                     </div>`:""}
                </div>`:""}
    </section>
+
+   ${s.undoVersion&&s.status==="published"&&k?`<div class="banner" role="status">
+         <div class="banner-copy">
+          <span class="banner-title">Restored version ${s.version}</span>
+          <span class="muted">You can switch back to version ${s.undoVersion} at any time.</span>
+         </div>
+         <div class="row" data-align-row data-align-wrap>
+          <button type="button" data-action="undo-restore" data-id="${b(s.id)}" data-version="${s.undoVersion}">Undo to v${s.undoVersion}</button>
+         </div>
+        </div>`:""}
 
    <section class="panel" aria-label="Versions">
     <div class="panel-section">
@@ -346,15 +350,6 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
       <h2>Versions</h2>
       <span class="muted small">Preview links last 30 days (up to 100)</span>
      </div>
-     ${s.undoVersion&&s.status==="published"&&k?`<div class="banner" style="margin-bottom:12px">
-           <div class="banner-copy">
-            <span class="banner-title">Restored version ${s.version}</span>
-            <span class="muted">You can switch back to version ${s.undoVersion} at any time.</span>
-           </div>
-           <div class="row" data-align-row data-align-wrap>
-            <button type="button" data-action="undo-restore" data-id="${b(s.id)}" data-version="${s.undoVersion}">Undo to v${s.undoVersion}</button>
-           </div>
-          </div>`:""}
      ${s.history&&s.history.length>0?`<div class="version-list">
            ${s.history.map(z=>{let S=z.id===s.deployment&&s.status!=="removed",Z=!S&&s.status==="published"&&k&&(z.project===s.project||z.pruned);return`<div class="version-row">
               <div class="version-info">

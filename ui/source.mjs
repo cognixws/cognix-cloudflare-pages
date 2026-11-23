@@ -313,10 +313,10 @@ function kindLabel(kind) {
         ${
          ready
           ? `<p class="muted small">Cloudflare Access one-time PIN login is verified for this account.</p>`
-          : `<div class="banner warn" role="status">
+          : `<div class="row spread" role="status">
               <div class="banner-copy">
                <span class="banner-title">Restricted access needs setup</span>
-               <span class="muted">${esc(setup?.message || "Save a Cloudflare Access API token in Settings and verify One-time PIN login.")}</span>
+               <span class="muted small">${esc(setup?.message || "Save a Cloudflare Access API token in Settings and verify One-time PIN login.")}</span>
               </div>
               <div class="row" data-align-row data-align-wrap>
                ${
@@ -591,7 +591,7 @@ function kindLabel(kind) {
   return `<div class="shell">
    <header class="topbar">
     <div class="row" data-align-row data-align-wrap>
-     <button type="button" class="ghost" data-action="nav-list">← Sites</button>
+     <button type="button" data-action="nav-list">All sites</button>
     </div>
     <div class="row" data-align-row data-align-wrap>
      ${p.artifact_id ? `<button type="button" data-sync="artifact" data-id="${esc(p.artifact_id)}">Open artifact</button>` : ""}
@@ -644,51 +644,59 @@ function kindLabel(kind) {
 
     ${
      activeOp && activeOp.status === "unknown"
-      ? `<div class="panel-section">
-          <div class="banner warn" role="status">
-           <div class="banner-copy">
-            <span class="banner-title">Delivery check needed</span>
-            <span class="muted">${esc(activeOp.error || "Cloudflare did not confirm the last step; check the result before starting another change.")}</span>
-           </div>
-           <div class="row" data-align-row data-align-wrap>
-            <button type="button" class="primary" data-action="check-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Check result</button>
-           </div>
+      ? `<div class="panel-section row spread" role="status">
+          <div class="banner-copy">
+           <span class="banner-title">Delivery check needed</span>
+           <span class="muted small">${esc(activeOp.error || "Cloudflare did not confirm the last step; check the result before starting another change.")}</span>
+          </div>
+          <div class="row" data-align-row data-align-wrap>
+           <button type="button" class="primary" data-action="check-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Check result</button>
           </div>
          </div>`
       : activeOp && activeOp.status === "prepared"
-        ? `<div class="panel-section">
-            <div class="banner" role="status">
-             <div class="banner-copy">
-              <span class="banner-title">Confirmation pending</span>
-              <span class="muted">Confirm or cancel the prepared change to continue.</span>
-             </div>
-             <div class="row" data-align-row data-align-wrap>
-              <button type="button" data-action="cancel-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Cancel</button>
-              <button type="button" class="primary" data-action="confirm-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Review change</button>
-             </div>
+        ? `<div class="panel-section row spread" role="status">
+            <div class="banner-copy">
+             <span class="banner-title">Confirmation pending</span>
+             <span class="muted small">Confirm or cancel the prepared change to continue.</span>
+            </div>
+            <div class="row" data-align-row data-align-wrap>
+             <button type="button" data-action="cancel-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Cancel</button>
+             <button type="button" class="primary" data-action="confirm-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Review change</button>
             </div>
            </div>`
         : activeOp
           ? `<div class="panel-section">${renderStepProgress(activeOp)}</div>`
           : lastOp?.status === "failed" && lastOp.error
-            ? `<div class="panel-section">
-                <div class="banner danger" role="alert">
-                 <div class="banner-copy">
-                  <span class="banner-title">Last operation failed</span>
-                  <span class="muted">${esc(lastOp.error)}</span>
-                 </div>
-                 ${
-                  p.artifact_id && canMutate
-                   ? `<div class="row" data-align-row data-align-wrap>
-                       <button type="button" data-action="open-review" data-id="${esc(p.artifact_id)}" data-version="${p.latestVersion || p.version || 1}">Review again</button>
-                      </div>`
-                   : ""
-                 }
+            ? `<div class="panel-section row spread" role="alert">
+                <div class="banner-copy">
+                 <span class="banner-title">Last operation failed</span>
+                 <span class="muted small">${esc(lastOp.error)}</span>
                 </div>
+                ${
+                 p.artifact_id && canMutate
+                  ? `<div class="row" data-align-row data-align-wrap>
+                      <button type="button" data-action="open-review" data-id="${esc(p.artifact_id)}" data-version="${p.latestVersion || p.version || 1}">Review again</button>
+                     </div>`
+                  : ""
+                }
                </div>`
             : ""
     }
    </section>
+
+   ${
+    p.undoVersion && p.status === "published" && canMutate
+     ? `<div class="banner" role="status">
+         <div class="banner-copy">
+          <span class="banner-title">Restored version ${p.version}</span>
+          <span class="muted">You can switch back to version ${p.undoVersion} at any time.</span>
+         </div>
+         <div class="row" data-align-row data-align-wrap>
+          <button type="button" data-action="undo-restore" data-id="${esc(p.id)}" data-version="${p.undoVersion}">Undo to v${p.undoVersion}</button>
+         </div>
+        </div>`
+     : ""
+   }
 
    <section class="panel" aria-label="Versions">
     <div class="panel-section">
@@ -696,19 +704,6 @@ function kindLabel(kind) {
       <h2>Versions</h2>
       <span class="muted small">Preview links last 30 days (up to 100)</span>
      </div>
-     ${
-      p.undoVersion && p.status === "published" && canMutate
-       ? `<div class="banner" style="margin-bottom:12px">
-           <div class="banner-copy">
-            <span class="banner-title">Restored version ${p.version}</span>
-            <span class="muted">You can switch back to version ${p.undoVersion} at any time.</span>
-           </div>
-           <div class="row" data-align-row data-align-wrap>
-            <button type="button" data-action="undo-restore" data-id="${esc(p.id)}" data-version="${p.undoVersion}">Undo to v${p.undoVersion}</button>
-           </div>
-          </div>`
-       : ""
-     }
      ${
       p.history && p.history.length > 0
        ? `<div class="version-list">
