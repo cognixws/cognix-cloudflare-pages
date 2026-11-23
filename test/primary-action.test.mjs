@@ -117,7 +117,7 @@ test("row 8 removed: the primary says it publishes a new site (defect 3)", () =>
  assert.equal(m.state, "removed");
  assert.deepEqual(m.primary, { kind: "new-site", label: "Publish again as a new site…", version: 2, enabled: true });
  assert.deepEqual(m.secondary, [], "no links to a removed address");
- assert.equal(m.sentence, "This site was removed; publishing again creates a new site at a new address.");
+ assert.equal(m.sentence, "This site was removed; publishing again creates a new site.");
  const r = review(p, 2, { form: { mode: "public", emails: [], analytics: true } });
  assert.deepEqual(r.primary, { kind: "new-site", label: "Publish v2 as a new site", version: 2, enabled: true });
  assert.equal(r.sentence, "The earlier site was removed; publishing creates a new site at the address above.");

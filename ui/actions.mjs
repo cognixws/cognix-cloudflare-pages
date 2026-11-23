@@ -81,7 +81,7 @@ export function siteActions({ surface, pub, selected, form = null, accessReady, 
    ? { kind: "new-site", label: "Publish again as a new site…", version: selected, enabled: true }
    : { kind: "new-site", label: `Publish v${selected} as a new site`, version: selected, enabled: true };
   out.sentence = manage
-   ? "This site was removed; publishing again creates a new site at a new address."
+   ? "This site was removed; publishing again creates a new site."
    : "The earlier site was removed; publishing creates a new site at the address above.";
  } else if (state === "new") {
   out.primary = { kind: "publish", label: `Publish v${selected}`, version: selected, enabled: true };
