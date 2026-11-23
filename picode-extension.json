@@ -1,7 +1,7 @@
 {
   "id": "cloudflare-pages",
   "name": "Cloudflare Pages",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "apiVersion": 26,
   "publisher": "COGNIX[WS]",
   "description": "Publish standalone page and design artifacts as Cloudflare Pages sites with public or email-restricted access, Web Analytics, version restore and agent publishing tools.",

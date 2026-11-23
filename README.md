@@ -1,6 +1,6 @@
 # Cloudflare Pages for COGNIX[WS]
 
-An independently maintained [COGNIX[WS]](https://github.com/cognixws/picode) extension (`cloudflare-pages`, `0.5.0`) that publishes standalone `page` and `design` artifacts as Cloudflare Pages sites with public or email-restricted access, cookie-free Web Analytics, version restore and agent publishing tools.
+An independently maintained [COGNIX[WS]](https://github.com/cognixws/picode) extension (`cloudflare-pages`, `0.5.1`) that publishes standalone `page` and `design` artifacts as Cloudflare Pages sites with public or email-restricted access, cookie-free Web Analytics, version restore and agent publishing tools.
 
 ## Requirements
 
@@ -21,6 +21,7 @@ An independently maintained [COGNIX[WS]](https://github.com/cognixws/picode) ext
 
 - **Artifact menu (`⋯ → Publish to Cloudflare Pages…`)**: appears only on `page` and `design` artifacts (`artifactKinds: ["page", "design"]`) and opens **Sites** directly on that artifact's review card, with **← Back to artifact** one click away (`places.artifact`).
 - **One confirmation**: **Publish vN** prepares the package and opens COGNIX[WS]'s immutable confirmation dialog directly — no duplicate form.
+- **One primary action per site state (0.5.1)**: the review and **Manage site** take their buttons from one rule (`ui/actions.mjs`, table in [`docs/acceptance.md`](docs/acceptance.md#051-primary-action-table)). The version already live shows **Open site**, not **Publish vN**; after a restore, **Undo to vN** is the one action for the version that was replaced; a removed site offers **Publish again as a new site…**, and the confirmation says it creates a new site.
 - **Short `.pages.dev` addresses**: new sites default to a clean title slug (`<slug>.pages.dev`), adding a short suffix only on collision or republication after removal.
 - **Public notice & non-blocking key scan**: public reviews state that preview links stay reachable for up to 30 days and scan text files locally for common key/token prefixes (`cfk_`, `cfut_`, `cfat_`, `cfoat_`, `sk-`, `ghp_`, `github_pat_`, `AKIA`, `AIza`, PEM). Warnings highlight **Inspect artifact** while keeping **Publish vN** primary and unblocked.
 - **Capability & kind refusals**: versions declaring workspace capabilities (`state`, `files`, `picode`, …) explain why static hosting cannot run them and offer **Ask \<Agent\> for a standalone version** (`places.agent`).

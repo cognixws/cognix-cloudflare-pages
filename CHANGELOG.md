@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+- **One primary action per site state**: the review and **Manage site** take their buttons from one tested rule (`ui/actions.mjs`; table in `docs/acceptance.md`). Fixes three defects from the 2026-11-23 real-account pilot:
+  - **Publish vN** no longer stays enabled when version N is already live: **Open site** leads, and **Publish vN** returns only when the access or Web Analytics choice in the form differs from the site.
+  - After a restore, **Undo to vN** is the one action for the replaced version; **Publish vN** no longer sits beside it (also in the sites list, which showed **Update vN**).
+  - A removed site offers **Publish again as a new site…** (review: **Publish vN as a new site**), and the confirmation reads "Publish version N as a new site?", naming the removed address; this holds after a cancelled republication too.
+- A restricted site whose Access setup is not ready holds the change with the reason in text and **Open settings**, instead of failing on confirm.
+- Enter in the review form submits only when the primary action is a publish.
+
 ## 0.5.0
 
 - **Focused artifact review (D1c & D2)**: `⋯ → Publish to Cloudflare Pages…` appears only on `page` and `design` artifacts (`apiVersion: 26` `artifactKinds`), opens **Sites** directly on the artifact's review with one-click **← Back to artifact** (`places.artifact`), and opens COGNIX[WS]'s confirmation dialog directly on **Publish vN**.

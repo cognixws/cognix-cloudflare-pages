@@ -2,6 +2,31 @@
 
 This document tracks automated fake-provider / scratch-browser verification versus real-account and native-device acceptance debts across releases.
 
+## 0.5.1 primary action table
+
+Which action leads in each state of a site. One rule, `siteActions()` in
+`ui/actions.mjs`, renders the review footer (selected version = the version
+picker) and the header of **Manage site** (selected version = the artifact's
+latest); the sites list row offers its primary only when it is **Update vN** or
+**Undo to vN**. The owner saw rows 2, 5 and 8 wrong in the 2026-11-23 pilot.
+Secondary actions are listed in the order shown, before the primary. "Form
+changed" means the review's access or Web Analytics choice differs from the
+site's. Every row is a test in `test/primary-action.test.mjs`.
+
+| # | Site state | Selected version | Primary (words) | Enabled | Secondary (review / Manage site) | Sentence |
+|---|---|---|---|---|---|---|
+| 1 | New (never published, or a draft without a project) | any N | Publish vN | yes | — / — | Publishes to Cloudflare account … |
+| 2 | Live at latest | N = live, form unchanged | Open site | yes | — / Copy link | Version N is currently published. |
+| 3 | Live | N = live, form changed | Publish vN | yes | — / Copy link, Open site | Version N is live; publishing it again applies the changed settings. |
+| 4 | Live at older (no restore) | N ≠ live | Publish vN | yes | — / Copy link, Open site | Version L is live; publishing replaces it with version N. |
+| 5 | Live at older after restore (undo U) | N = U, form unchanged | Undo to vU | yes | — / Copy link, Open site | Version L was restored; Undo switches the site back to version U. |
+| 6 | Live at older after restore | N = live | Open site | yes | Undo to vU / Copy link, Undo to vU | Version L is currently published. |
+| 7 | Live at older after restore | N ≠ live, N ≠ U | Publish vN | yes | Undo to vU / Copy link, Open site, Undo to vU | Version L is live; publishing replaces it with version N. |
+| 8 | Removed (also after a cancelled republication: no project, history kept) | latest N | Review: Publish vN as a new site · Manage site: Publish again as a new site… (opens the review) | yes | — / — (no links to a removed address) | The earlier site was removed; publishing creates a new site at the address above. Host confirm: "Publish version N as a new site?", "<old>.pages.dev was removed, so this creates a new site: …", button "Publish new site". |
+| 8b | Removed, artifact deleted locally | none | — | — | — | — |
+| 9 | Restricted pending setup (site or form restricted, Access setup not ready) | rows 3, 4, 5, 7 | the same words | no | Undo hidden; Manage site adds Open settings | Restricted access needs setup before this site can change. (Review: the access field also shows the setup banner.) Rows 2 and 6 keep Open site; Manage site of a new or removed site only opens the review and is not held. |
+| 10 | Other account, an operation prepared / running / to check, or no connection | any | none (the operation's own Confirm, Cancel or Check result leads) | — | Manage site keeps Copy link, Open site | — |
+
 ## v0.5.0 (Phase F1) decision table: token state × deployment state × artifact kind → action
 
 | Token state | Deployment state | Artifact kind / capabilities | Operation | Expected outcome | Evidence |

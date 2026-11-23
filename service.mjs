@@ -497,6 +497,8 @@ export class PagesService {
   // A row this call inserts or resets is undone if prepare fails before the
   // operation is recorded, so a refused call leaves no draft behind (B10).
   let undoRow = null;
+  // Set when this publish recreates a removed site: the confirmation says so (0.5.1).
+  let removedProject = null;
   const c = await this.configuration();
 
   try {
@@ -520,6 +522,11 @@ export class PagesService {
     warnings = this.scan(bundle);
 
     if (!p) p = this.db.prepare("SELECT * FROM publications WHERE artifact_id=?").get(artifactId);
+    // A row without a project that has deployment history is a removed site
+    // whose republication was prepared and cancelled: still a new site.
+    if (p && p.status !== "removed" && !p.identity) {
+     removedProject = this.db.prepare("SELECT project FROM deployments WHERE publication_id=? ORDER BY created_at DESC LIMIT 1").get(p.id)?.project || null;
+    }
     if (!p) {
      const cfNew = this.remote(c.account, c.token);
      const id = randomUUID();
@@ -533,6 +540,7 @@ export class PagesService {
     } else if (p.status === "removed") {
      const cfRemoved = this.remote(c.account, c.token);
      const previousProject = p.project;
+     removedProject = previousProject;
      undoRow = { id: p.id, row: { ...p } };
      const allocated = projectName || (await this.allocateGeneratedProject(cfRemoved, src.artifact.title || p.title, p.id, previousProject));
      this.db
@@ -725,7 +733,9 @@ export class PagesService {
               : "Disable Web Analytics?"
             : action === "rename"
               ? "Change the site address?"
-              : `Publish version ${version} to ${p.project}.pages.dev?`,
+              : removedProject
+                ? `Publish version ${version} as a new site?`
+                : `Publish version ${version} to ${p.project}.pages.dev?`,
     message:
      action === "remove"
       ? `Remove ${p.project} from Cloudflare account ${p.account_id}.${notes} The local artifact stays. Managed access protection is cleaned up only after site removal.`
@@ -739,7 +749,9 @@ export class PagesService {
             ? `Publish “${p.title}”, version ${version}, to ${projectName}.pages.dev and remove ${p.project}.pages.dev in Cloudflare account ${p.account_id}.${notes} ${audience}`
             : action === "rollback"
               ? restoreMessage
-              : `Publish “${p.title}”, version ${version}, to ${p.project}.pages.dev in Cloudflare account ${maskAccountId(p.account_id)}. ${audience}${coverage}`,
+              : removedProject
+                ? `${removedProject}.pages.dev was removed, so this creates a new site: “${p.title}”, version ${version}, at ${p.project}.pages.dev in Cloudflare account ${maskAccountId(p.account_id)}. ${audience}${coverage}`
+                : `Publish “${p.title}”, version ${version}, to ${p.project}.pages.dev in Cloudflare account ${maskAccountId(p.account_id)}. ${audience}${coverage}`,
     confirmLabel:
      action === "access"
       ? "Change access"
@@ -753,7 +765,9 @@ export class PagesService {
               : "Disable analytics"
             : action === "rename"
               ? "Change address"
-              : "Publish",
+              : removedProject
+                ? "Publish new site"
+                : "Publish",
     danger: action === "remove" || action === "rename" || (p.access_mode === "restricted" && config.mode === "public"),
    };
 
