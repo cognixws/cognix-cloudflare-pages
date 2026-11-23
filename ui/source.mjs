@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { actionButtonsHTML, restoreOffered, seedForm, siteActions } from "./actions.mjs";
 
 const projectNameSchema = z
  .string()
@@ -96,6 +97,8 @@ function kindLabel(kind) {
  let accessEmails = "";
  let analyticsOn = true;
  let justPublishedSiteId = "";
+ let formTouched = false; // the review's access or analytics choice was edited in this review
+ let lastReviewActions = null; // the review footer's siteActions(), so Enter submits only a publish
 
  let selectedSiteId = "";
  let filter = "all"; // "all" | "update" | "attention" | "private" | "removed"
@@ -130,6 +133,8 @@ function kindLabel(kind) {
 
  const isReady = () => state?.connection?.status === "ready";
  const canRestrict = (mode) => mode !== "restricted" || state?.accessSetup?.status === "ready";
+ // Access waits for a token or settings, not only for a check (renderAccessControls decides the same way).
+ const accessNeedsSettings = () => state?.accessSetup?.status === "not-configured" || Boolean(state?.accessSetup?.settingsRequired);
 
  // Synchronous host navigation helpers (preserve user activation for places.* and links.open).
  function goSettings() {
@@ -388,6 +393,10 @@ function kindLabel(kind) {
   </div>`;
  }
 
+ function renderActionButtons(actions, pub, surface = "review") {
+  return actionButtonsHTML(actions, pub, { surface, busy, copiedKey });
+ }
+
  function renderReviewView() {
   const nonRemovedCount = (state?.publications || []).filter((p) => p.status !== "removed").length;
   const backArtId = originArtifactId || reviewArtifactId;
@@ -435,6 +444,15 @@ function kindLabel(kind) {
     latestPub.version === reviewData.selectedVersion &&
     latestPub.url,
   );
+  const reviewActions = (lastReviewActions = siteActions({
+   surface: "review",
+   pub: latestPub,
+   selected: reviewData.selectedVersion,
+   form: { mode: accessMode, emails: accessEmails.split(/[\s,;]+/).filter(Boolean), analytics: analyticsOn },
+   accessReady: state?.accessSetup?.status === "ready",
+   accessSettings: accessNeedsSettings(),
+   blocked: Boolean(activeOp),
+  }));
 
   const headerSection = `<div class="panel-section review-head">
    <div class="review-meta">
@@ -557,19 +575,15 @@ function kindLabel(kind) {
       </label>
      </div>
      <div class="panel-section review-footer">
-      <span class="muted small">${
-       hasExistingProject && latestPub.version === reviewData.selectedVersion && latestPub.access_mode === accessMode
-        ? `Version ${reviewData.selectedVersion} is currently published.`
-        : `Publishes to Cloudflare account ${esc(state?.accountHint || "")}.`
-      }</span>
+      <span class="muted small">${esc(reviewActions.sentence || `Publishes to Cloudflare account ${state?.accountHint || ""}.`)}</span>
       <div class="row" data-align-row data-align-wrap>
        ${
         activeOp?.status === "prepared"
          ? `<button type="button" data-action="cancel-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Cancel</button>
             <button type="button" class="primary" data-action="confirm-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Confirm v${reviewData.selectedVersion}</button>`
-         : `<button type="submit" class="primary" ${busy || !canRestrict(accessMode) ? "disabled" : ""}>${
-             busy === "publish" ? "Preparing…" : `Publish v${reviewData.selectedVersion}`
-            }</button>`
+         : isLiveJustNow && reviewActions.primary.kind === "open-site"
+           ? renderActionButtons({ ...reviewActions, primary: { kind: "none" } }, latestPub)
+           : renderActionButtons(reviewActions, latestPub)
        }
       </div>
      </div>
@@ -587,6 +601,14 @@ function kindLabel(kind) {
   const activeOp = p.operations?.find((o) => ACTIVE_OPS.has(o.status));
   const lastOp = activeOp || p.operations?.[0];
   const canMutate = isReady() && !p.otherAccount && !activeOp && !busy;
+  const manageActions = siteActions({
+   surface: "manage",
+   pub: p,
+   selected: p.artifact_id ? p.latestVersion || 0 : 0,
+   accessReady: state?.accessSetup?.status === "ready",
+   accessSettings: accessNeedsSettings(),
+   blocked: Boolean(activeOp) || !isReady(),
+  });
 
   return `<div class="shell">
    <header class="topbar">
@@ -626,19 +648,10 @@ function kindLabel(kind) {
        ${p.artifactKind === "design" ? `<span class="badge">Design</span>` : ""}
       </div>
       <div class="row" data-align-row data-align-wrap>
-       ${
-        p.url && p.status !== "removed"
-         ? `<button type="button" data-sync="copy" data-url="${esc(p.url)}" data-key="detail-${esc(p.id)}">${copiedKey === "detail-" + p.id ? "Copied" : "Copy link"}</button>
-            <button type="button" class="${p.latestVersion && p.latestVersion > p.version && canMutate ? "" : "primary"}" data-sync="open-url" data-url="${esc(p.url)}">Open site</button>`
-         : ""
-       }
-       ${
-        p.latestVersion && p.latestVersion > (p.version || 0) && canMutate
-         ? `<button type="button" class="primary" data-action="open-review" data-id="${esc(p.artifact_id)}" data-version="${p.latestVersion}">Publish v${p.latestVersion}</button>`
-         : ""
-       }
+       ${renderActionButtons(manageActions, p, "manage")}
       </div>
      </div>
+     ${manageActions.sentence ? `<p class="muted small" style="margin-top:6px">${esc(manageActions.sentence)}</p>` : ""}
      <p class="muted detail-url" style="margin-top:6px">${esc(p.url || p.project + ".pages.dev")}</p>
     </div>
 
@@ -684,20 +697,6 @@ function kindLabel(kind) {
     }
    </section>
 
-   ${
-    p.undoVersion && p.status === "published" && canMutate
-     ? `<div class="banner" role="status">
-         <div class="banner-copy">
-          <span class="banner-title">Restored version ${p.version}</span>
-          <span class="muted">You can switch back to version ${p.undoVersion} at any time.</span>
-         </div>
-         <div class="row" data-align-row data-align-wrap>
-          <button type="button" data-action="undo-restore" data-id="${esc(p.id)}" data-version="${p.undoVersion}">Undo to v${p.undoVersion}</button>
-         </div>
-        </div>`
-     : ""
-   }
-
    <section class="panel" aria-label="Versions">
     <div class="panel-section">
      <div class="row spread" style="margin-bottom:8px">
@@ -710,7 +709,7 @@ function kindLabel(kind) {
            ${p.history
             .map((d) => {
              const isCurrent = d.id === p.deployment && p.status !== "removed";
-             const canRestoreRow = !isCurrent && p.status === "published" && canMutate && (d.project === p.project || d.pruned);
+             const canRestoreRow = !isCurrent && restoreOffered(p, d.version, state?.accessSetup?.status === "ready") && canMutate && (d.project === p.project || d.pruned);
              return `<div class="version-row">
               <div class="version-info">
                <div class="row">
@@ -948,11 +947,24 @@ function kindLabel(kind) {
               p.access_mode === "restricted" ? `Restricted (${p.access_emails.length})` : "Public"
              }</div>
              <div class="site-actions" data-align-row data-align-wrap>
-              ${
-               p.siteStatus === "update" && p.latestVersion && isReady() && !p.otherAccount
-                ? `<button type="button" class="primary" data-action="open-review" data-id="${esc(p.artifact_id)}" data-version="${p.latestVersion}">Update v${p.latestVersion}</button>`
-                : ""
-              }
+              ${(() => {
+               // The row offers the site's primary change only (ui/actions.mjs): Update vN or Undo to vN.
+               if (p.siteStatus !== "update") return "";
+               const a = siteActions({
+                surface: "manage",
+                pub: p,
+                selected: p.artifact_id ? p.latestVersion || 0 : 0,
+                accessReady: state?.accessSetup?.status === "ready",
+                blocked: !isReady() || Boolean(p.operations?.find((o) => ACTIVE_OPS.has(o.status))),
+               }).primary;
+               if (a.kind === "publish" && a.enabled) {
+                return `<button type="button" class="primary" data-action="open-review" data-id="${esc(p.artifact_id)}" data-version="${a.version}">Update v${a.version}</button>`;
+               }
+               if (a.kind === "undo" && a.enabled) {
+                return `<button type="button" class="primary" data-action="undo-restore" data-id="${esc(p.id)}" data-version="${a.version}" ${busy ? "disabled" : ""}>${esc(a.label)}</button>`;
+               }
+               return "";
+              })()}
               ${
                known
                 ? `<button type="button" data-sync="copy" data-url="${esc(p.url)}" data-key="row-${esc(p.id)}">${copiedKey === "row-" + p.id ? "Copied" : "Copy"}</button>
@@ -1103,6 +1115,7 @@ function kindLabel(kind) {
   note = "";
   if (switchingArtifact) {
    projectTouched = false;
+   formTouched = false;
    justPublishedSiteId = "";
   }
   if (!isReady()) {
@@ -1122,11 +1135,14 @@ function kindLabel(kind) {
    if (switchingArtifact || !projectTouched) {
     projectName = data.suggestedProject || "";
    }
-   if (switchingArtifact) {
-    const pub = data.publication;
-    accessMode = pub?.access_mode || "public";
-    accessEmails = (pub?.access_emails || []).join(", ");
-    analyticsOn = pub?.hasProject ? Boolean(pub.analytics) : true;
+   // The form starts from the site's own settings whenever the person has not
+   // edited it in this review, so a stale choice is never shown as a change.
+   if (switchingArtifact || !formTouched) {
+    const seeded = seedForm(data.publication);
+    accessMode = seeded.mode;
+    accessEmails = seeded.emails;
+    analyticsOn = seeded.analytics;
+    formTouched = false;
    }
   } catch (e) {
    if (seq === reviewSeq) error = e.message;
@@ -1232,6 +1248,7 @@ function kindLabel(kind) {
   }
   if (name === "review-access-mode") {
    accessMode = id;
+   formTouched = true;
    render();
    return;
   }
@@ -1302,7 +1319,10 @@ function kindLabel(kind) {
      access: parseAccess(accessMode, accessEmails),
      analytics: analyticsOn,
     });
-    if (op) justPublishedSiteId = op.publication_id;
+    if (op) {
+     justPublishedSiteId = op.publication_id;
+     formTouched = false;
+    }
    } else if (name === "access-save" && accessEditor) {
     const op = await prepareAndConfirm({
      action: "access",
@@ -1355,6 +1375,8 @@ function kindLabel(kind) {
    projectTouched = true;
   } else if (t.id === "review-access-emails") {
    accessEmails = t.value;
+   formTouched = true;
+   render();
   } else if (t.id === "edit-access-emails" && accessEditor) {
    accessEditor.emails = t.value;
   } else if (t.id === "rename-name" && renameEditor) {
@@ -1374,12 +1396,17 @@ function kindLabel(kind) {
    void openReview(reviewArtifactId, Number(t.value), false);
   } else if (t.id === "review-analytics") {
    analyticsOn = Boolean(t.checked);
+   formTouched = true;
+   render();
   }
  });
 
  root.addEventListener("submit", (e) => {
   e.preventDefault();
-  if (e.target.id === "review-form") void dispatchAction("publish");
+  if (e.target.id === "review-form") {
+   const primary = lastReviewActions?.primary;
+   if (primary && (primary.kind === "publish" || primary.kind === "new-site") && primary.enabled) void dispatchAction("publish");
+  }
   else if (e.target.id === "access-form") void dispatchAction("access-save");
   else if (e.target.id === "rename-form") void dispatchAction("rename-save");
  });
