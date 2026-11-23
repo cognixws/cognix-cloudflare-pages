@@ -11,7 +11,16 @@ latest); the sites list row offers its primary only when it is **Update vN** or
 **Undo to vN**. The owner saw rows 2, 5 and 8 wrong in the 2026-11-23 pilot.
 Secondary actions are listed in the order shown, before the primary. "Form
 changed" means the review's access or Web Analytics choice differs from the
-site's. Every row is a test in `test/primary-action.test.mjs`.
+site's. Every row is a test in `test/primary-action.test.mjs`, and the buttons are
+rendered by one pure function (`actionButtonsHTML()`), tested for rows 2, 5, 8
+and 9. The review form starts from the site's own access and Web Analytics on
+every review until the person edits it, so a choice left over from an earlier
+review is never presented as a change.
+
+Known limit (row 2): when the live version and settings match, no Publish is
+offered. If the site was deployed from outside the extension (the canonical
+deployment drifted), the way back is a Restore of another history row, or
+Cloudflare itself; the extension does not offer a re-push of the same version.
 
 | # | Site state | Selected version | Primary (words) | Enabled | Secondary (review / Manage site) | Sentence |
 |---|---|---|---|---|---|---|
@@ -20,13 +29,13 @@ site's. Every row is a test in `test/primary-action.test.mjs`.
 | 3 | Live | N = live, form changed | Publish vN | yes | — / Copy link, Open site | Version N is live; publishing it again applies the changed settings. |
 | 4 | Live at older (no restore) | N ≠ live | Publish vN | yes | — / Copy link, Open site | Version L is live; publishing replaces it with version N. |
 | 5 | Live at older after restore (undo U) | N = U, form unchanged | Undo to vU | yes | — / Copy link, Open site | Version L was restored; Undo switches the site back to version U. |
-| 5b | History list (Manage site › Versions) | each row's version | Restore only for a version that is neither live nor the Undo version (`restoreOffered()`) | — | — | — |
+| 5b | History list (Manage site › Versions) | each row's version | Restore only for a version that is neither live nor the Undo version, and not on a restricted site while Access setup is not ready (`restoreOffered()`) | — | — | — |
 | 6 | Live at older after restore | N = live | Open site | yes | Undo to vU / Copy link, Undo to vU | Version L is currently published. |
 | 7 | Live at older after restore | N ≠ live, N ≠ U | Publish vN | yes | Undo to vU / Copy link, Open site, Undo to vU | Version L is live; publishing replaces it with version N. |
 | 8 | Removed (also after a cancelled republication: no project, history kept) | latest N | Review: Publish vN as a new site · Manage site: Publish again as a new site… (opens the review) | yes | — / — (no links to a removed address) | Review: The earlier site was removed; publishing creates a new site at the address above. Manage site: This site was removed; publishing again creates a new site. Host confirm: "Publish version N as a new site?", "<old>.pages.dev was removed, so this creates a new site: …", button "Publish new site". |
 | 8b | Removed, artifact deleted locally | none | — | — | — | — |
-| 9 | Restricted pending setup (site or form restricted, Access setup not ready) | rows 3, 4, 5, 7 | the same words | no | Undo hidden; Manage site adds Open settings | Restricted access needs setup before this site can change. (Review: the access field also shows the setup banner.) Rows 2 and 6 keep Open site; Manage site of a new or removed site only opens the review and is not held. |
-| 10 | Other account, an operation prepared / running / to check, or no connection | any | none (the operation's own Confirm, Cancel or Check result leads) | — | Manage site keeps Copy link, Open site | — |
+| 9 | Restricted pending setup (Access setup not ready; a publish is held on the form's access, Undo and history Restore on the site's, since a rollback keeps the site's access) | rows 3, 4, 5, 7 | the same words | no | held Undo hidden; adds Open settings when Access needs a token or settings, Check setup when it only needs a check (review: only when the form is public, since the access field shows its own setup banner otherwise) | Restricted access needs setup before this site can change. / Cloudflare Access is not verified yet; check it before this site can change. Rows 2 and 6 keep Open site; Manage site of a new or removed site only opens the review and is not held. |
+| 10 | Other account, an operation prepared / running / to check (review too: Enter does nothing), or no connection | any | none (the operation's own Confirm, Cancel or Check result leads) | — | Manage site keeps Copy link, Open site | — |
 
 ## v0.5.0 (Phase F1) decision table: token state × deployment state × artifact kind → action
 

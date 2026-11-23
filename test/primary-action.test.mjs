@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-import { restoreOffered, siteActions, siteState } from "../ui/actions.mjs";
+import { actionButtonsHTML, restoreOffered, seedForm, siteActions, siteState } from "../ui/actions.mjs";
 import { Cloudflare } from "../cloudflare.mjs";
 import { PagesService } from "../service.mjs";
 import { startFakeCloudflare } from "./fake-cloudflare.mjs";
@@ -112,7 +112,8 @@ test("row 7 after a restore, a newer version than the undo one: Publish vN leads
 });
 
 test("row 8 removed: the primary says it publishes a new site (defect 3)", () => {
- const p = pub({ status: "removed", hasProject: false, version: 1, url: null });
+ // serializePublication keeps hasProject true after removal (identity is not cleared).
+ const p = pub({ status: "removed", hasProject: true, version: 1, url: "https://site.pages.dev" });
  const m = manage(p);
  assert.equal(m.state, "removed");
  assert.deepEqual(m.primary, { kind: "new-site", label: "Publish again as a new site…", version: 2, enabled: true });
@@ -163,12 +164,12 @@ test("row 10 another account, an operation in progress or no connection: no prim
 
 test("both views take their actions from ui/actions.mjs (one rule), and Enter submits only a publish", () => {
  const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
- assert.match(src, /import \{ restoreOffered, siteActions \} from "\.\/actions\.mjs";/);
+ assert.match(src, /import \{ actionButtonsHTML, restoreOffered, seedForm, siteActions \} from "\.\/actions\.mjs";/);
  const reviewFn = src.slice(src.indexOf(" function renderReviewView() {"), src.indexOf(" function renderDetailView() {"));
  const detailFn = src.slice(src.indexOf(" function renderDetailView() {"), src.indexOf(" function renderListView() {"));
  assert.match(reviewFn, /siteActions\(\{\s*surface: "review"/);
  assert.match(detailFn, /siteActions\(\{\s*surface: "manage"/);
- assert.match(detailFn, /restoreOffered\(p, d\.version\)/);
+ assert.match(detailFn, /restoreOffered\(p, d\.version, /);
  // No hand-made Publish vN or Undo button is left in either view.
  for (const fn of [reviewFn, detailFn]) {
   assert.doesNotMatch(fn, />Publish v\$\{/);
@@ -247,4 +248,91 @@ test("row 5 in the history list: no Restore for the live version or for the Undo
  assert.equal(restoreOffered(live, 1), true);
  assert.equal(restoreOffered(live, 2), false);
  assert.equal(restoreOffered(pub({ status: "removed", hasProject: false }), 1), false);
+});
+
+// Independent review, 2026-11-23 (findings 1-5, 7). Each fails without its fix.
+
+test("review F1: the form is seeded from the site on every review unless edited, so stale choices are not called changes", () => {
+ assert.deepEqual(seedForm(null), { mode: "public", emails: "", analytics: true });
+ assert.deepEqual(seedForm(pub({ analytics: null })), { mode: "public", emails: "", analytics: false });
+ assert.deepEqual(seedForm(pub({ access_mode: "restricted", access_emails: ["a@example.com", "b@example.com"] })), {
+  mode: "restricted",
+  emails: "a@example.com, b@example.com",
+  analytics: true,
+ });
+ assert.equal(seedForm(pub({ status: "removed", analytics: null })).analytics, true, "a removed site starts as a new one");
+ const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
+ const open = src.slice(src.indexOf(" async function openReview("), src.indexOf(" async function prepareAndConfirm("));
+ assert.match(open, /if \(switchingArtifact \|\| !formTouched\) \{\s*const seeded = seedForm\(data\.publication\);/);
+ for (const edit of [/accessMode = id;\s*formTouched = true;/, /accessEmails = t\.value;\s*formTouched = true;/, /analyticsOn = Boolean\(t\.checked\);\s*formTouched = true;/]) {
+  assert.match(src, edit);
+ }
+});
+
+test("review F2: Undo is held on the site's access, a publish on the form's", () => {
+ const restricted = pub({ access_mode: "restricted", access_emails: ["a@example.com"], version: 1, undoVersion: 2, latestVersion: 2 });
+ // Form switched to public: Undo still uses the restricted site and waits.
+ const r = siteActions({ surface: "review", pub: restricted, selected: 2, form: { mode: "public", emails: [], analytics: true }, accessReady: false });
+ assert.equal(r.primary.kind, "publish", "the form changed, so Publish v2 applies it");
+ assert.equal(r.primary.enabled, true, "a public publish does not need Access");
+ const u = siteActions({ surface: "manage", pub: restricted, selected: 2, accessReady: false });
+ assert.deepEqual([u.primary.kind, u.primary.enabled], ["undo", false]);
+ // A public site with restricted chosen in the form: Undo is not hidden.
+ const pubSite = pub({ version: 1, undoVersion: 2, latestVersion: 3 });
+ const v = siteActions({ surface: "review", pub: pubSite, selected: 3, form: { mode: "restricted", emails: ["a@example.com"], analytics: true }, accessReady: false });
+ assert.equal(v.primary.enabled, false);
+ assert.ok(v.secondary.some((a) => a.kind === "undo"), "Undo keeps the public site's access and works");
+});
+
+test("review F3: history Restore is held like the header; the setup action follows the Access status", () => {
+ const restricted = pub({ access_mode: "restricted", access_emails: ["a@example.com"], version: 2, latestVersion: 2 });
+ assert.equal(restoreOffered(restricted, 1, false), false);
+ assert.equal(restoreOffered(restricted, 1, true), true);
+ assert.equal(restoreOffered(pub({ version: 2 }), 1, false), true, "a public site does not wait for Access");
+ const older = pub({ access_mode: "restricted", access_emails: ["a@example.com"], version: 1, latestVersion: 2 });
+ const unchecked = siteActions({ surface: "manage", pub: older, selected: 2, accessReady: false, accessSettings: false });
+ assert.deepEqual(unchecked.secondary.at(-1), { kind: "check-setup", label: "Check setup" });
+ assert.equal(unchecked.sentence, "Cloudflare Access is not verified yet; check it before this site can change.");
+ const missing = siteActions({ surface: "manage", pub: older, selected: 2, accessReady: false, accessSettings: true });
+ assert.deepEqual(missing.secondary.at(-1), { kind: "settings", label: "Open settings" });
+ const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
+ assert.match(src, /restoreOffered\(p, d\.version, state\?\.accessSetup\?\.status === "ready"\)/);
+ assert.match(actionButtonsHTML(unchecked, older, { surface: "manage" }), /<button type="button" data-action="access-setup">Check setup<\/button>/);
+});
+
+test("review F4: with an operation prepared the review has no publish primary, so Enter does nothing", () => {
+ const r = siteActions({ surface: "review", pub: pub({ version: 1 }), selected: 2, form: same(pub()), accessReady: true, blocked: true });
+ assert.equal(r.primary.kind, "none");
+ const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
+ const reviewFn = src.slice(src.indexOf(" function renderReviewView() {"), src.indexOf(" function renderDetailView() {"));
+ assert.match(reviewFn, /surface: "review",[\s\S]*?blocked: Boolean\(activeOp\),/);
+});
+
+test("review F5: the buttons rows 2, 5, 8 and 9 render, with their attributes", () => {
+ const live = pub();
+ assert.equal(
+  actionButtonsHTML(siteActions({ surface: "manage", pub: live, selected: 2, accessReady: true }), live, { surface: "manage" }),
+  '<button type="button" data-sync="copy" data-url="https://site.pages.dev" data-key="manage-site-1">Copy link</button>\n<button type="button" class="primary" data-sync="open-url" data-url="https://site.pages.dev">Open site</button>',
+ );
+ const restored = pub({ version: 1, undoVersion: 2 });
+ const review5 = actionButtonsHTML(siteActions({ surface: "review", pub: restored, selected: 2, form: same(restored), accessReady: true }), restored);
+ assert.equal(review5, '<button type="button" class="primary" data-action="undo-restore" data-id="site-1" data-version="2">Undo to v2</button>');
+ assert.doesNotMatch(review5, /type="submit"/, "Enter cannot publish v2 beside Undo");
+ const removed = pub({ status: "removed", version: 1 });
+ assert.equal(
+  actionButtonsHTML(siteActions({ surface: "manage", pub: removed, selected: 2, accessReady: true }), removed, { surface: "manage" }),
+  '<button type="button" class="primary" data-action="open-review" data-id="art-1" data-version="2">Publish again as a new site…</button>',
+ );
+ assert.equal(
+  actionButtonsHTML(siteActions({ surface: "review", pub: removed, selected: 2, form: { mode: "public", emails: [], analytics: true }, accessReady: true }), removed),
+  '<button type="submit" class="primary">Publish v2 as a new site</button>',
+ );
+ const held = pub({ access_mode: "restricted", access_emails: ["a@example.com"], version: 1, latestVersion: 2 });
+ assert.match(
+  actionButtonsHTML(siteActions({ surface: "manage", pub: held, selected: 2, accessReady: false }), held, { surface: "manage" }),
+  /<button type="button" class="primary" data-action="open-review" data-id="art-1" data-version="2" disabled>Publish v2<\/button>$/,
+ );
+ assert.match(actionButtonsHTML(siteActions({ surface: "review", pub: null, selected: 1, form: { mode: "public", emails: [] }, accessReady: true }), null, { busy: "publish" }), /disabled>Preparing…</);
+ const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
+ assert.match(src, /return actionButtonsHTML\(actions, pub, \{ surface, busy, copiedKey \}\);/);
 });

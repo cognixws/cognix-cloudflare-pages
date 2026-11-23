@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { restoreOffered, siteActions } from "./actions.mjs";
+import { actionButtonsHTML, restoreOffered, seedForm, siteActions } from "./actions.mjs";
 
 const projectNameSchema = z
  .string()
@@ -97,6 +97,7 @@ function kindLabel(kind) {
  let accessEmails = "";
  let analyticsOn = true;
  let justPublishedSiteId = "";
+ let formTouched = false; // the review's access or analytics choice was edited in this review
  let lastReviewActions = null; // the review footer's siteActions(), so Enter submits only a publish
 
  let selectedSiteId = "";
@@ -132,6 +133,8 @@ function kindLabel(kind) {
 
  const isReady = () => state?.connection?.status === "ready";
  const canRestrict = (mode) => mode !== "restricted" || state?.accessSetup?.status === "ready";
+ // Access waits for a token or settings, not only for a check (renderAccessControls decides the same way).
+ const accessNeedsSettings = () => state?.accessSetup?.status === "not-configured" || Boolean(state?.accessSetup?.settingsRequired);
 
  // Synchronous host navigation helpers (preserve user activation for places.* and links.open).
  function goSettings() {
@@ -390,30 +393,8 @@ function kindLabel(kind) {
   </div>`;
  }
 
- // Renders the primary action and its secondary actions from siteActions()
- // (ui/actions.mjs): secondaries first, the primary last.
  function renderActionButtons(actions, pub, surface = "review") {
-  const button = (a, primary) => {
-   const cls = primary ? ` class="primary"` : "";
-   const held = primary && !a.enabled;
-   if (a.kind === "publish" || a.kind === "new-site") {
-    if (surface === "review") {
-     return `<button type="submit"${cls} ${busy || held ? "disabled" : ""}>${busy === "publish" ? "Preparing…" : esc(a.label)}</button>`;
-    }
-    return `<button type="button"${cls} data-action="open-review" data-id="${esc(pub.artifact_id)}" data-version="${a.version}" ${busy || held ? "disabled" : ""}>${esc(a.label)}</button>`;
-   }
-   if (a.kind === "undo") {
-    return `<button type="button"${cls} data-action="undo-restore" data-id="${esc(pub.id)}" data-version="${a.version}" ${busy || held ? "disabled" : ""}>${busy === "undo-restore" ? "Preparing…" : esc(a.label)}</button>`;
-   }
-   if (a.kind === "open-site") return `<button type="button"${cls} data-sync="open-url" data-url="${esc(pub.url)}">${esc(a.label)}</button>`;
-   if (a.kind === "copy-link") {
-    const key = `${surface}-${pub.id}`;
-    return `<button type="button"${cls} data-sync="copy" data-url="${esc(pub.url)}" data-key="${esc(key)}">${copiedKey === key ? "Copied" : esc(a.label)}</button>`;
-   }
-   if (a.kind === "settings") return `<button type="button"${cls} data-sync="settings">${esc(a.label)}</button>`;
-   return "";
-  };
-  return [...actions.secondary.map((a) => button(a, false)), actions.primary.kind === "none" ? "" : button(actions.primary, true)].join("\n");
+  return actionButtonsHTML(actions, pub, { surface, busy, copiedKey });
  }
 
  function renderReviewView() {
@@ -469,6 +450,8 @@ function kindLabel(kind) {
    selected: reviewData.selectedVersion,
    form: { mode: accessMode, emails: accessEmails.split(/[\s,;]+/).filter(Boolean), analytics: analyticsOn },
    accessReady: state?.accessSetup?.status === "ready",
+   accessSettings: accessNeedsSettings(),
+   blocked: Boolean(activeOp),
   }));
 
   const headerSection = `<div class="panel-section review-head">
@@ -623,6 +606,7 @@ function kindLabel(kind) {
    pub: p,
    selected: p.artifact_id ? p.latestVersion || 0 : 0,
    accessReady: state?.accessSetup?.status === "ready",
+   accessSettings: accessNeedsSettings(),
    blocked: Boolean(activeOp) || !isReady(),
   });
 
@@ -725,7 +709,7 @@ function kindLabel(kind) {
            ${p.history
             .map((d) => {
              const isCurrent = d.id === p.deployment && p.status !== "removed";
-             const canRestoreRow = !isCurrent && restoreOffered(p, d.version) && canMutate && (d.project === p.project || d.pruned);
+             const canRestoreRow = !isCurrent && restoreOffered(p, d.version, state?.accessSetup?.status === "ready") && canMutate && (d.project === p.project || d.pruned);
              return `<div class="version-row">
               <div class="version-info">
                <div class="row">
@@ -1131,6 +1115,7 @@ function kindLabel(kind) {
   note = "";
   if (switchingArtifact) {
    projectTouched = false;
+   formTouched = false;
    justPublishedSiteId = "";
   }
   if (!isReady()) {
@@ -1150,11 +1135,14 @@ function kindLabel(kind) {
    if (switchingArtifact || !projectTouched) {
     projectName = data.suggestedProject || "";
    }
-   if (switchingArtifact) {
-    const pub = data.publication;
-    accessMode = pub?.access_mode || "public";
-    accessEmails = (pub?.access_emails || []).join(", ");
-    analyticsOn = pub?.hasProject ? Boolean(pub.analytics) : true;
+   // The form starts from the site's own settings whenever the person has not
+   // edited it in this review, so a stale choice is never shown as a change.
+   if (switchingArtifact || !formTouched) {
+    const seeded = seedForm(data.publication);
+    accessMode = seeded.mode;
+    accessEmails = seeded.emails;
+    analyticsOn = seeded.analytics;
+    formTouched = false;
    }
   } catch (e) {
    if (seq === reviewSeq) error = e.message;
@@ -1260,6 +1248,7 @@ function kindLabel(kind) {
   }
   if (name === "review-access-mode") {
    accessMode = id;
+   formTouched = true;
    render();
    return;
   }
@@ -1330,7 +1319,10 @@ function kindLabel(kind) {
      access: parseAccess(accessMode, accessEmails),
      analytics: analyticsOn,
     });
-    if (op) justPublishedSiteId = op.publication_id;
+    if (op) {
+     justPublishedSiteId = op.publication_id;
+     formTouched = false;
+    }
    } else if (name === "access-save" && accessEditor) {
     const op = await prepareAndConfirm({
      action: "access",
@@ -1383,6 +1375,7 @@ function kindLabel(kind) {
    projectTouched = true;
   } else if (t.id === "review-access-emails") {
    accessEmails = t.value;
+   formTouched = true;
    render();
   } else if (t.id === "edit-access-emails" && accessEditor) {
    accessEditor.emails = t.value;
@@ -1403,6 +1396,7 @@ function kindLabel(kind) {
    void openReview(reviewArtifactId, Number(t.value), false);
   } else if (t.id === "review-analytics") {
    analyticsOn = Boolean(t.checked);
+   formTouched = true;
    render();
   }
  });

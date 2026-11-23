@@ -47,15 +47,18 @@ export function siteState(pub) {
  * @param {number} o.selected the version in view: the review's selected version, Manage site's latest
  * @param {{mode:string,emails:string[],analytics?:boolean}|null} [o.form] the review form's choices
  * @param {boolean} o.accessReady Cloudflare Access setup is ready
+ * @param {boolean} [o.accessSettings] Access needs a token or other settings (not only a check)
  * @param {boolean} [o.blocked] an operation is prepared, running or needs a check, or the
  *   Cloudflare connection is not ready: nothing may change, the live links stay
  */
-export function siteActions({ surface, pub, selected, form = null, accessReady, blocked = false }) {
+export function siteActions({ surface, pub, selected, form = null, accessReady, accessSettings = true, blocked = false }) {
  const state = siteState(pub);
  const live = pub?.version || 0;
  const undo = pub?.undoVersion || 0;
  const changed = formDiffers(pub, form);
- const mode = form?.mode || pub?.access_mode || "public";
+ // A publish uses the form's access; Undo keeps the site's (prepare sends none).
+ const formMode = form?.mode || pub?.access_mode || "public";
+ const siteMode = pub?.access_mode || "public";
  const out = { state, primary: { kind: "none", label: "", enabled: false }, secondary: [], sentence: "" };
  const manage = surface === "manage";
  const openSite = { kind: "open-site", label: "Open site" };
@@ -110,22 +113,66 @@ export function siteActions({ surface, pub, selected, form = null, accessReady, 
  // the access choice is made again, so it is not held there.
  const mutating = ["publish", "new-site", "undo"];
  const choosesAgain = manage && (state === "new" || state === "removed");
- if (mode === "restricted" && !accessReady && !choosesAgain) {
-  if (mutating.includes(out.primary.kind)) {
-   out.primary = { ...out.primary, enabled: false };
-   out.sentence = "Restricted access needs setup before this site can change.";
-   if (manage) out.secondary.push({ kind: "settings", label: "Open settings" });
+ const held = (a) =>
+  !accessReady && !choosesAgain && mutating.includes(a.kind) && (a.kind === "undo" ? siteMode : formMode) === "restricted";
+ if (held(out.primary)) {
+  out.primary = { ...out.primary, enabled: false };
+  out.sentence = accessSettings
+   ? "Restricted access needs setup before this site can change."
+   : "Cloudflare Access is not verified yet; check it before this site can change.";
+  // The review's access field shows its own setup banner when the form is restricted.
+  if (manage || formMode !== "restricted") {
+   out.secondary.push(accessSettings ? { kind: "settings", label: "Open settings" } : { kind: "check-setup", label: "Check setup" });
   }
-  out.secondary = out.secondary.filter((a) => !mutating.includes(a.kind));
  }
+ out.secondary = out.secondary.filter((a) => !held(a));
  return out;
 }
 
 // A history row offers Restore only for a version that is neither live (a
-// no-op) nor the one Undo already switches back to (two actions for one thing).
-export function restoreOffered(pub, rowVersion) {
+// no-op) nor the one Undo already switches back to (two actions for one thing),
+// and not while a restricted site waits for Access setup (it would fail).
+export function restoreOffered(pub, rowVersion, accessReady = true) {
  if (!pub || pub.status !== "published") return false;
+ if (pub.access_mode === "restricted" && !accessReady) return false;
  if (rowVersion === pub.version) return false;
  if (pub.undoVersion && rowVersion === pub.undoVersion) return false;
  return true;
+}
+
+const esc = (v) =>
+ String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+// The buttons of siteActions(): secondaries first, the primary last. In the
+// review a publish is the form's submit; in Manage site it opens the review.
+export function actionButtonsHTML(actions, pub, { surface = "review", busy = "", copiedKey = "" } = {}) {
+ const button = (a, primary) => {
+  const cls = primary ? ` class="primary"` : "";
+  const off = busy || (primary && !a.enabled) ? " disabled" : "";
+  if (a.kind === "publish" || a.kind === "new-site") {
+   if (surface === "review") return `<button type="submit"${cls}${off}>${busy === "publish" ? "Preparing…" : esc(a.label)}</button>`;
+   return `<button type="button"${cls} data-action="open-review" data-id="${esc(pub.artifact_id)}" data-version="${a.version}"${off}>${esc(a.label)}</button>`;
+  }
+  if (a.kind === "undo") {
+   return `<button type="button"${cls} data-action="undo-restore" data-id="${esc(pub.id)}" data-version="${a.version}"${off}>${busy === "undo-restore" ? "Preparing…" : esc(a.label)}</button>`;
+  }
+  if (a.kind === "open-site") return `<button type="button"${cls} data-sync="open-url" data-url="${esc(pub.url)}">${esc(a.label)}</button>`;
+  if (a.kind === "copy-link") {
+   const key = `${surface}-${pub.id}`;
+   return `<button type="button"${cls} data-sync="copy" data-url="${esc(pub.url)}" data-key="${esc(key)}">${copiedKey === key ? "Copied" : esc(a.label)}</button>`;
+  }
+  if (a.kind === "settings") return `<button type="button"${cls} data-sync="settings">${esc(a.label)}</button>`;
+  if (a.kind === "check-setup") return `<button type="button"${cls} data-action="access-setup"${busy ? " disabled" : ""}>${busy === "access-setup" ? "Checking…" : esc(a.label)}</button>`;
+  return "";
+ };
+ return [...actions.secondary.map((a) => button(a, false)), actions.primary.kind === "none" ? "" : button(actions.primary, true)].join("\n");
+}
+
+// The review form's starting choices: the site's own, or the defaults for a new one.
+export function seedForm(pub) {
+ return {
+  mode: pub?.access_mode || "public",
+  emails: (pub?.access_emails || []).join(", "),
+  analytics: pub?.hasProject && pub.status !== "removed" ? Boolean(pub.analytics) : true,
+ };
 }
