@@ -1,15 +1,17 @@
 {
   "id": "cloudflare-pages",
   "name": "Cloudflare Pages",
-  "version": "0.4.1",
-  "apiVersion": 2,
-  "publisher": "COGNIXWS",
-  "description": "Publish artifact versions to Cloudflare Pages with public or email-restricted access, Web Analytics, a dashboard analytics link, address changes, update, restore and remove sites.",
+  "version": "0.5.0",
+  "apiVersion": 26,
+  "publisher": "COGNIX[WS]",
+  "description": "Publish standalone page and design artifacts as Cloudflare Pages sites with public or email-restricted access, Web Analytics, version restore and agent publishing tools.",
+  "outsideEffects": true,
   "process": {
     "command": "node",
     "args": [
       "${extensionDir}/server.mjs"
-    ]
+    ],
+    "settingsCheck": "/settings/check"
   },
   "activation": {
     "instance": true
@@ -17,7 +19,8 @@
   "permissions": [
     "artifacts:read",
     "artifacts:export",
-    "events:publish"
+    "events:publish",
+    "inbox:write"
   ],
   "settings": [
     {
@@ -31,26 +34,170 @@
       "label": "Cloudflare API token",
       "type": "secret",
       "required": true,
-      "description": "Cloudflare Pages Edit for this account. For Web Analytics it also needs Account Settings Read and Write."
+      "description": "Create a token with Cloudflare Pages: Edit, Account Settings: Edit and Account Analytics: Read."
     },
     {
       "key": "access_api_token",
       "label": "Cloudflare Access API token (optional)",
       "type": "secret",
       "required": false,
-      "description": "For Restricted sites: Access Apps and Policies Write, plus Access Organizations, Identity Providers, and Groups Read, scoped to this account. Set up Zero Trust and One-time PIN first."
+      "description": "For Only people I choose: Access: Apps and Policies Write, plus Access: Organizations, Identity Providers, and Groups Read, with Zero Trust One-time PIN enabled."
     }
   ],
   "storage": {
     "migrations": "migrations"
   },
+  "agent": {
+    "executor": {
+      "protocol": "picode-tools/1",
+      "command": "node",
+      "args": [
+        "${extensionDir}/execute.mjs"
+      ]
+    },
+    "capabilities": [
+      {
+        "id": "pages",
+        "label": "Cloudflare Pages sites",
+        "description": "List published sites, publish or update standalone page and design artifacts, inspect status and restore earlier versions.",
+        "tools": [
+          {
+            "id": "sites",
+            "description": "List up to 50 Cloudflare Pages sites for the connected account, optionally filtered by state.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "filter": {
+                  "type": "string",
+                  "enum": [
+                    "all",
+                    "update",
+                    "attention",
+                    "private",
+                    "removed"
+                  ],
+                  "description": "Filter sites by status."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "publish",
+            "description": "Publish or update a standalone page or design artifact on Cloudflare Pages. Idempotent: the same artifact keeps its address. Removing a site, making a restricted site public and changing an existing address require the owner in Sites.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "artifact": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "description": "Artifact ID to publish."
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Artifact version number; defaults to the artifact's live version."
+                },
+                "access": {
+                  "type": "string",
+                  "enum": [
+                    "public",
+                    "restricted"
+                  ],
+                  "description": "Who can open the site; making an existing restricted site public is refused."
+                },
+                "emails": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 254
+                  },
+                  "maxItems": 50,
+                  "description": "Allowed reader email addresses when access is restricted."
+                },
+                "analytics": {
+                  "type": "boolean",
+                  "description": "Whether Cloudflare Web Analytics counts visits on this site."
+                },
+                "projectName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 58,
+                  "description": "Optional initial .pages.dev subdomain for a new site."
+                }
+              },
+              "required": [
+                "artifact"
+              ],
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "status",
+            "description": "Read compact publication and operation status for an artifact or operation ID.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "artifact": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "description": "Artifact ID."
+                },
+                "operation": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80,
+                  "description": "Operation ID."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "id": "restore",
+            "description": "Restore a previously published version of a site (rolls back on Cloudflare, or re-uploads the local immutable artifact version if Cloudflare pruned the deployment).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "artifact": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "description": "Artifact ID of the published site."
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Previously published artifact version to restore."
+                }
+              },
+              "required": [
+                "artifact",
+                "version"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ]
+      }
+    ]
+  },
   "ui": {
     "pages": [
       {
         "id": "publications",
-        "title": "Publications",
+        "title": "Sites",
         "path": "ui/index.html"
       }
+    ],
+    "places": [
+      "artifact",
+      "settings",
+      "inbox",
+      "agent"
     ]
   },
   "contributes": {
@@ -58,7 +205,11 @@
       {
         "id": "publish",
         "title": "Publish to Cloudflare Pages…",
-        "page": "publications"
+        "page": "publications",
+        "artifactKinds": [
+          "page",
+          "design"
+        ]
       }
     ],
     "menus": {

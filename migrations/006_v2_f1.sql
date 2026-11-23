@@ -1,0 +1,5 @@
+ALTER TABLE deployments ADD COLUMN pruned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE publications ADD COLUMN undo_version INTEGER;
+ALTER TABLE operations ADD COLUMN actor TEXT NOT NULL DEFAULT 'owner';
+ALTER TABLE operations ADD COLUMN actor_name TEXT;
+ALTER TABLE operations ADD COLUMN warnings TEXT;
