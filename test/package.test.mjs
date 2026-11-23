@@ -45,3 +45,20 @@ test("the package exposes the v0.5.0 COGNIX[WS] installation contract", () => {
   assert.ok(existsSync(new URL("../" + p, import.meta.url)), p);
  }
 });
+
+test("B11: package-lock.json carries the manifest version", () => {
+ const m = JSON.parse(readFileSync(new URL("../picode-extension.json", import.meta.url), "utf8"));
+ const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+ assert.equal(lock.version, m.version);
+ assert.equal(lock.packages[""].version, m.version);
+ assert.equal(pkg.version, m.version);
+});
+
+test("B11: the startup failure offers Try again, which reloads the page", () => {
+ const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
+ const failure = src.slice(src.lastIndexOf("})().catch("));
+ assert.match(failure, /Sites could not start/);
+ assert.match(failure, /<button type="button" class="primary" data-action="restart">Try again<\/button>/);
+ assert.match(failure, /addEventListener\("click", \(\) => location\.reload\(\)\)/);
+});

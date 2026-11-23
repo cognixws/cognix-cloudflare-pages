@@ -1467,5 +1467,17 @@ function kindLabel(kind) {
 })().catch(() => {
  const root = document.getElementById("root");
  root.setAttribute("aria-busy", "false");
- root.innerHTML = `<div class="shell"><div class="state-box"><h2>Sites could not start</h2><p class="muted">Reopen Sites from Extensions or reload this tab.</p></div></div>`;
+ root.innerHTML = `<div class="shell">
+  <header class="topbar"><h1>Sites</h1></header>
+  <div class="state-box">
+   <h2>Sites could not start</h2>
+   <p class="muted">COGNIX[WS] did not finish opening this page; Try again reloads it.</p>
+   <div class="row state-actions" data-align-row data-align-wrap>
+    <button type="button" class="primary" data-action="restart">Try again</button>
+   </div>
+  </div>
+ </div>`;
+ const retry = root.querySelector('[data-action="restart"]');
+ retry.addEventListener("click", () => location.reload());
+ retry.focus();
 });
