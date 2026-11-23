@@ -599,7 +599,7 @@ function kindLabel(kind) {
          ? `<button type="button" data-action="cancel-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Cancel</button>
             <button type="button" class="primary" data-action="confirm-op" data-id="${esc(activeOp.id)}" ${busy ? "disabled" : ""}>Confirm v${reviewData.selectedVersion}</button>`
          : isLiveJustNow && reviewActions.primary.kind === "open-site"
-           ? ""
+           ? renderActionButtons({ ...reviewActions, primary: { kind: "none" } }, latestPub)
            : renderActionButtons(reviewActions, latestPub)
        }
       </div>

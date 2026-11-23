@@ -174,6 +174,9 @@ test("both views take their actions from ui/actions.mjs (one rule), and Enter su
   assert.doesNotMatch(fn, />Undo to v\$\{/);
  }
  assert.match(src, /primary\.kind === "publish" \|\| primary\.kind === "new-site"\) && primary\.enabled\) void dispatchAction\("publish"\)/);
+ // Row 6 under the "Version N is live" banner: the banner carries Open site,
+ // the footer keeps the secondary Undo (seen dropped in scratch QA).
+ assert.match(reviewFn, /isLiveJustNow && reviewActions\.primary\.kind === "open-site"\s*\? renderActionButtons\(\{ \.\.\.reviewActions, primary: \{ kind: "none" \} \}, latestPub\)/);
 });
 
 async function setup(t) {
