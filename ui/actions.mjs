@@ -120,3 +120,12 @@ export function siteActions({ surface, pub, selected, form = null, accessReady, 
  }
  return out;
 }
+
+// A history row offers Restore only for a version that is neither live (a
+// no-op) nor the one Undo already switches back to (two actions for one thing).
+export function restoreOffered(pub, rowVersion) {
+ if (!pub || pub.status !== "published") return false;
+ if (rowVersion === pub.version) return false;
+ if (pub.undoVersion && rowVersion === pub.undoVersion) return false;
+ return true;
+}

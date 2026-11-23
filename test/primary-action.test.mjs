@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-import { siteActions, siteState } from "../ui/actions.mjs";
+import { restoreOffered, siteActions, siteState } from "../ui/actions.mjs";
 import { Cloudflare } from "../cloudflare.mjs";
 import { PagesService } from "../service.mjs";
 import { startFakeCloudflare } from "./fake-cloudflare.mjs";
@@ -163,11 +163,12 @@ test("row 10 another account, an operation in progress or no connection: no prim
 
 test("both views take their actions from ui/actions.mjs (one rule), and Enter submits only a publish", () => {
  const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
- assert.match(src, /import \{ siteActions \} from "\.\/actions\.mjs";/);
+ assert.match(src, /import \{ restoreOffered, siteActions \} from "\.\/actions\.mjs";/);
  const reviewFn = src.slice(src.indexOf(" function renderReviewView() {"), src.indexOf(" function renderDetailView() {"));
  const detailFn = src.slice(src.indexOf(" function renderDetailView() {"), src.indexOf(" function renderListView() {"));
  assert.match(reviewFn, /siteActions\(\{\s*surface: "review"/);
  assert.match(detailFn, /siteActions\(\{\s*surface: "manage"/);
+ assert.match(detailFn, /restoreOffered\(p, d\.version\)/);
  // No hand-made Publish vN or Undo button is left in either view.
  for (const fn of [reviewFn, detailFn]) {
   assert.doesNotMatch(fn, />Publish v\$\{/);
@@ -235,4 +236,15 @@ test("row 8 host confirm: republishing a removed site says it creates a new site
  assert.match(fourth.confirmation.title, /^Publish version 1 to [a-z0-9-]+\.pages\.dev\?$/);
  assert.equal(fourth.confirmation.confirmLabel, "Publish");
  svc.cancel(fourth.id);
+});
+
+test("row 5 in the history list: no Restore for the live version or for the Undo version (visual review, 2026-11-23)", () => {
+ const restored = pub({ version: 1, undoVersion: 2, latestVersion: 3 });
+ assert.equal(restoreOffered(restored, 1), false, "v1 is live: a no-op");
+ assert.equal(restoreOffered(restored, 2), false, "Undo to v2 is the one action for v2");
+ assert.equal(restoreOffered(restored, 3), true);
+ const live = pub({ version: 2, undoVersion: null });
+ assert.equal(restoreOffered(live, 1), true);
+ assert.equal(restoreOffered(live, 2), false);
+ assert.equal(restoreOffered(pub({ status: "removed", hasProject: false }), 1), false);
 });

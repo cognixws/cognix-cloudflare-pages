@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { siteActions } from "./actions.mjs";
+import { restoreOffered, siteActions } from "./actions.mjs";
 
 const projectNameSchema = z
  .string()
@@ -725,7 +725,7 @@ function kindLabel(kind) {
            ${p.history
             .map((d) => {
              const isCurrent = d.id === p.deployment && p.status !== "removed";
-             const canRestoreRow = !isCurrent && p.status === "published" && canMutate && (d.project === p.project || d.pruned);
+             const canRestoreRow = !isCurrent && restoreOffered(p, d.version) && canMutate && (d.project === p.project || d.pruned);
              return `<div class="version-row">
               <div class="version-info">
                <div class="row">
