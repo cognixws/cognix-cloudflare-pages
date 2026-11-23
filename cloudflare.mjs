@@ -10,15 +10,17 @@ export function assetHash(file) {
  return hash(file.data + extname(file.path).substring(1)).toString("hex").slice(0,32);
 }
 
-// Loopback-only test API override for scratch QA against a local HTTP stub
-// (never accepts a non-loopback host, so credentials can never be redirected
-// off this machine).
-export function resolveApiBase(override = process.env.CLOUDFLARE_PAGES_TEST_API_URL) {
+// Loopback-only API base for tests and scratch QA against a local HTTP stub.
+// It reaches the client only through the constructor (test/serve-fake.mjs);
+// production never reads it from the environment, which the daemon passes to
+// extensions. A non-loopback host is refused, so credentials never leave
+// this machine.
+export function resolveApiBase(override) {
  if (!override) return { apiBase: "https://api.cloudflare.com/client/v4", edgeBase: "" };
  let u;
- try { u = new URL(override); } catch { throw new Error("Invalid CLOUDFLARE_PAGES_TEST_API_URL."); }
+ try { u = new URL(override); } catch { throw new Error("Invalid test API URL."); }
  if (u.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) || u.username || u.password) {
-  throw new Error("CLOUDFLARE_PAGES_TEST_API_URL must use loopback HTTP.");
+  throw new Error("The test API URL must use loopback HTTP.");
  }
  const origin = u.origin;
  return { apiBase: origin + "/client/v4", edgeBase: origin + "/__edge/" };
@@ -27,7 +29,7 @@ export function resolveApiBase(override = process.env.CLOUDFLARE_PAGES_TEST_API_
 // Transport is injected only in tests. Production fixes HTTPS/API origin and
 // refuses redirects, so a credential never follows a different destination.
 export class Cloudflare {
- constructor(account, token, transport = fetch, apiOverride = process.env.CLOUDFLARE_PAGES_TEST_API_URL) {
+ constructor(account, token, transport = fetch, apiOverride = "") {
   if (!/^[a-fA-F0-9]{32}$/.test(account) || !token) throw new RemoteError("Configure the Cloudflare account and API token.",409);
   const { apiBase, edgeBase } = resolveApiBase(apiOverride);
   this.account=account;this.token=token;this.transport=transport;this.apiBase=apiBase;this.edgeBase=edgeBase;

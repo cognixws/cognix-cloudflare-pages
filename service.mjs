@@ -43,6 +43,8 @@ export class PagesService {
   this.checkGeneration = 0;
   this.accessSetupCheck = null;
   this.accessCheckGeneration = 0;
+  this.bundleCache = null;
+  this.scanCache = new Map();
   this.access = new PublicationAccess({ db, remote, configuration: () => this.configuration() });
   this.analytics = new PublicationAnalytics({ db });
   db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
@@ -96,6 +98,9 @@ export class PagesService {
   const cf = this.remote(account, token);
   let analytics = "ready";
   let message = "Account access verified.";
+  // Each secret is checked on its own: the main API token decides whether the
+  // settings save; an Access token that fails is recorded for Sites (which
+  // names it) and never blocks saving a good main token.
   try {
    await cf.checkConnection();
    if (typeof cf.rumSites === "function") {
@@ -107,27 +112,12 @@ export class PagesService {
      message += " Web Analytics needs Account Settings: Edit (Account Settings Read and Write) on the token.";
     }
    }
-   if (accessToken) {
-    const ac = this.remote(account, accessToken);
-    const org = (await ac.call(`/accounts/${account}/access/organizations`)).result;
-    if (!org?.auth_domain || !/^[a-z0-9-]+\.cloudflareaccess\.com$/.test(org.auth_domain)) {
-     return { status: 400, body: { valid: false } };
-    }
-    const providers = (await ac.call(`/accounts/${account}/access/identity_providers`)).result;
-    if (!Array.isArray(providers) || !providers.some((p) => p.type === "onetimepin" && p.id)) {
-     return { status: 400, body: { valid: false } };
-    }
-    await ac.call(`/accounts/${account}/access/apps?per_page=1`);
-    this.accessSetupCheck = {
-     status: "ready",
-     message: "Email-code login configured. Each active reader uses 1 Zero Trust seat.",
-     fingerprint: digest(merged),
-    };
-   }
   } catch (e) {
    const code = e instanceof RemoteError && [400, 401, 403, 409, 429].includes(e.status) ? e.status : 502;
-   return { status: code === 404 ? 401 : code, body: { valid: false } };
+   return { status: code, body: { valid: false, field: "api_token" } };
   }
+  if (accessToken) this.accessSetupCheck = { ...(await this.checkAccessToken(account, accessToken)), fingerprint: digest(merged) };
+  else this.accessSetupCheck = null;
   this.connectionCheck = {
    status: "ready",
    checkedAt: now(),
@@ -136,7 +126,30 @@ export class PagesService {
    fingerprint: digest(merged),
   };
   void this.event();
-  return { status: 200, body: { valid: true } };
+  return { status: 200, body: { valid: true, ...(this.accessSetupCheck?.status === "error" ? { warning: "access_api_token" } : {}) } };
+ }
+
+ // The optional Access token, checked apart from the main token (B9).
+ async checkAccessToken(account, accessToken) {
+  const refused = (message) => ({ status: "error", settingsRequired: true, field: "access_api_token", message });
+  try {
+   const ac = this.remote(account, accessToken);
+   const org = (await ac.call(`/accounts/${account}/access/organizations`)).result;
+   if (!org?.auth_domain || !/^[a-z0-9-]+\.cloudflareaccess\.com$/.test(org.auth_domain)) {
+    return refused("The Access API token works, but Zero Trust has no team domain yet. Finish Zero Trust setup in Cloudflare.");
+   }
+   const providers = (await ac.call(`/accounts/${account}/access/identity_providers`)).result;
+   if (!Array.isArray(providers) || !providers.some((p) => p.type === "onetimepin" && p.id)) {
+    return refused("The Access API token works, but One-time PIN login is off. Turn it on in Zero Trust.");
+   }
+   await ac.call(`/accounts/${account}/access/apps?per_page=1`);
+   return { status: "ready", message: "Email-code login configured. Each active reader uses 1 Zero Trust seat." };
+  } catch (e) {
+   if (e instanceof RemoteError && [401, 403].includes(e.status)) {
+    return refused("Cloudflare refused the Access API token. The main token is saved; paste a new Access token to restrict sites.");
+   }
+   return { status: "error", settingsRequired: false, field: "access_api_token", message: "The Access API token could not be checked. Check it again shortly." };
+  }
  }
 
  // A read-only account check never proves write permission or publishes a site.
@@ -248,7 +261,30 @@ export class PagesService {
 
  async source(id) { return this.host("/artifacts/" + encodeURIComponent(id)); }
  // JSON base64 expands the core's 128 MiB raw package; leave metadata headroom.
- async bundle(id, version) { return this.host("/artifacts/" + encodeURIComponent(id) + "/versions/" + version + "/site", 192 << 20); }
+ // Artifact versions are immutable, so one publish (review, prepare, execute)
+ // downloads the bundle once: the last bundle is kept for a few minutes and
+ // dropped when its operation ends. Scan results are kept by digest.
+ async bundle(id, version) {
+  const key = id + "@" + version;
+  const hit = this.bundleCache;
+  if (hit && hit.key === key && Date.now() - hit.at < 10 * 60_000) return hit.bundle;
+  const bundle = await this.host("/artifacts/" + encodeURIComponent(id) + "/versions/" + version + "/site", 192 << 20);
+  this.bundleCache = { key, bundle, at: Date.now() };
+  return bundle;
+ }
+ dropBundle(id, version) {
+  if (this.bundleCache?.key === id + "@" + version) this.bundleCache = null;
+ }
+ scan(bundle) {
+  const key = bundle?.digest;
+  if (key && this.scanCache.has(key)) return this.scanCache.get(key);
+  const warnings = scanBundleForSecrets(bundle);
+  if (key) {
+   if (this.scanCache.size >= 32) this.scanCache.delete(this.scanCache.keys().next().value);
+   this.scanCache.set(key, warnings);
+  }
+  return warnings;
+ }
 
  serializePublication(p, artifacts, activeAccount) {
   const art = artifacts.find((a) => a.id === p.artifact_id) || null;
@@ -395,7 +431,7 @@ export class PagesService {
 
   try {
    const b = await this.bundle(artifactId, ver.n);
-   const warnings = scanBundleForSecrets(b);
+   const warnings = this.scan(b);
    const fileCount = (b.files || []).filter((f) => f.path !== "_headers").length;
    return {
     artifact,
@@ -458,6 +494,9 @@ export class PagesService {
   let bundle;
   let warnings = [];
   let reuploadRestore = false;
+  // A row this call inserts or resets is undone if prepare fails before the
+  // operation is recorded, so a refused call leaves no draft behind (B10).
+  let undoRow = null;
   const c = await this.configuration();
 
   try {
@@ -478,7 +517,7 @@ export class PagesService {
      throw new RemoteError(`Version ${version} declares workspace capabilities (${verMeta.capabilities.join(", ")}); prepare a standalone version first.`, 409);
     }
     bundle = await this.bundle(artifactId, version);
-    warnings = scanBundleForSecrets(bundle);
+    warnings = this.scan(bundle);
 
     if (!p) p = this.db.prepare("SELECT * FROM publications WHERE artifact_id=?").get(artifactId);
     if (!p) {
@@ -489,10 +528,12 @@ export class PagesService {
      this.db
       .prepare("INSERT INTO publications(id,artifact_id,title,account_id,project,created_at,generated_name) VALUES(?,?,?,?,?,?,?)")
       .run(p.id, p.artifact_id, p.title, p.account_id, p.project, p.created_at, projectName ? 0 : 1);
+     undoRow = { id: p.id, row: null };
      p = this.pub(p.id);
     } else if (p.status === "removed") {
      const cfRemoved = this.remote(c.account, c.token);
      const previousProject = p.project;
+     undoRow = { id: p.id, row: { ...p } };
      const allocated = projectName || (await this.allocateGeneratedProject(cfRemoved, src.artifact.title || p.title, p.id, previousProject));
      this.db
       .prepare("UPDATE publications SET account_id=?,title=?,identity=NULL,project=?,generated_name=?,status='draft',version=NULL,digest=NULL,deployment=NULL,url=NULL,undo_version=NULL WHERE id=?")
@@ -748,8 +789,21 @@ export class PagesService {
    return this.operation(id);
   } catch (e) {
    this.recordAuthError(e, c);
+   if (undoRow) this.undoPrepareRow(undoRow);
    throw e;
   }
+ }
+
+ undoPrepareRow({ id, row }) {
+  if (this.db.prepare("SELECT id FROM operations WHERE publication_id=? LIMIT 1").get(id)) {
+   if (!row) return;
+  }
+  if (!row) {
+   this.db.prepare("DELETE FROM publications WHERE id=?").run(id);
+   return;
+  }
+  const cols = Object.keys(row).filter((k) => k !== "id");
+  this.db.prepare(`UPDATE publications SET ${cols.map((k) => k + "=?").join(",")} WHERE id=?`).run(...cols.map((k) => row[k]), id);
  }
 
  operation(id) {
@@ -793,7 +847,14 @@ export class PagesService {
   queueMicrotask(() =>
    this.execute(id, recovery)
     .catch(() => {})
-    .finally(() => this.running.delete(id)),
+    .finally(() => {
+     this.running.delete(id);
+     const op = this.op(id);
+     if (op && !active.includes(op.status)) {
+      const p = this.pub(op.publication_id);
+      if (p) this.dropBundle(p.artifact_id, op.version);
+     }
+    }),
   );
  }
 
@@ -813,7 +874,9 @@ export class PagesService {
 
  async notifyInboxFYI(p, op, url) {
   if (!op.actor || !op.actor.startsWith("agent:")) return;
-  const who = op.actor_name || op.actor.slice(6) || "An agent";
+  // The host sends no agent name and this extension does not hold agents:read,
+  // so the FYI never shows a raw agent id (B6).
+  const who = op.actor_name || "An agent";
   let workspaceId = "";
   try {
    const src = await this.source(p.artifact_id);
@@ -829,11 +892,31 @@ export class PagesService {
   }).catch(() => {});
  }
 
+ async notifyFailureFYI(id) {
+  const op = this.op(id);
+  if (!op?.actor?.startsWith("agent:") || !["publish", "rollback"].includes(op.action)) return;
+  const p = this.pub(op.publication_id);
+  if (!p) return;
+  let workspaceId = "";
+  try {
+   workspaceId = (await this.source(p.artifact_id))?.artifact?.workspaceId || "";
+  } catch {}
+  const who = op.actor_name || "An agent";
+  const verb = op.action === "rollback" ? "restore" : "publish";
+  const ending = op.status === "unknown" ? "The result is uncertain; check it in Sites." : "Nothing changed on the live site.";
+  await this.host("/inbox", 64 << 10, {
+   title: `${who} could not ${verb} version ${op.version} of ${p.title}`,
+   body: `${op.error || "Cloudflare did not complete the operation."} ${ending}`.slice(0, 1000),
+   workspaceId,
+  }).catch(() => {});
+ }
+
  async finish(cf, p, op, deployment) {
   const d = await cf.deployment(p.project, deployment);
   const status = d.latest_stage?.status;
   if (["failure", "failed", "canceled", "cancelled"].includes(status)) {
    this.set(op.id, "failed", { error: "Cloudflare could not publish this version. The previous publication is retained." });
+   await this.notifyFailureFYI(op.id);
    return;
   }
   if (status !== "success") {
@@ -1225,6 +1308,7 @@ export class PagesService {
     effect && (recovery || !(e instanceof RemoteError && [400, 401, 403, 404, 409, 422].includes(e.status) && this.op(id).remote_phase !== "protecting")) ? "unknown" : "failed",
     { error: e instanceof RemoteError ? e.message : "The operation could not complete. Check its result." },
    );
+   await this.notifyFailureFYI(id);
   }
  }
 
@@ -1294,15 +1378,31 @@ export class PagesService {
   }
   const args = req.arguments || {};
   const agentId = req.context?.agent || "agent";
-  const agentName = req.context?.agentName || agentId;
   const actor = `agent:${agentId}`;
+  // The extension is instance-wide, so the host lets it read every
+  // workspace's artifacts. An agent only sees and changes sites whose artifact
+  // is in its own workspace (free agents: artifacts with no workspace) (B1).
+  const agentWorkspace = String(req.context?.workspace || "");
+  const inScope = (artifact) => Boolean(artifact) && String(artifact.workspaceId || "") === agentWorkspace;
+  const NOT_HERE = (id) => `Artifact ${id} is not available in this agent's workspace.`;
+  const scopedSource = async (id) => {
+   let src;
+   try {
+    src = await this.source(id);
+   } catch (e) {
+    if (e instanceof RemoteError && e.status === 404) return null;
+    throw e;
+   }
+   return inScope(src?.artifact) ? src : null;
+  };
 
   try {
    if (req.tool === "sites") {
     const st = await this.state();
     const filter = args.filter || "all";
+    const here = new Set(st.artifacts.filter(inScope).map((a) => a.id));
     const list = st.publications
-     .filter((p) => !p.otherAccount)
+     .filter((p) => !p.otherAccount && here.has(p.artifact_id))
      .filter((p) => {
       if (filter === "removed") return p.status === "removed";
       if (p.status === "removed") return false;
@@ -1329,8 +1429,9 @@ export class PagesService {
 
    if (req.tool === "status") {
     if (args.operation) {
-     const op = this.operation(String(args.operation));
-     const p = this.pub(op.publication_id);
+     const op = this.op(String(args.operation));
+     const p = op ? this.pub(op.publication_id) : null;
+     if (!op || !p || !(await scopedSource(p.artifact_id))) return failTool("The operation was not found.");
      const out = {
       operation: { id: op.id, action: op.action, status: op.status, version: op.version, error: op.error || null },
       artifact: p?.artifact_id || null,
@@ -1340,6 +1441,7 @@ export class PagesService {
      return okTool(`Operation ${op.id}: ${op.status}${op.error ? " — " + op.error : ""}`, out);
     }
     if (!args.artifact) return failTool("Provide artifact or operation.");
+    if (!(await scopedSource(String(args.artifact)))) return failTool(NOT_HERE(args.artifact));
     const st = await this.state();
     const pub = st.publications.find((x) => x.artifact_id === args.artifact);
     if (!pub) return okTool(`Artifact ${args.artifact} is not published.`, { artifact: args.artifact, status: "unpublished" });
@@ -1361,23 +1463,37 @@ export class PagesService {
    if (req.tool === "publish") {
     const artifactId = String(args.artifact || "").trim();
     if (!artifactId) return failTool("artifact is required.");
+    const src = await scopedSource(artifactId);
+    if (!src) return failTool(NOT_HERE(artifactId));
     const existing = this.db.prepare("SELECT * FROM publications WHERE artifact_id=?").get(artifactId);
-    // D3 human-only boundaries:
-    if (existing && existing.status !== "removed") {
-     if (existing.access_mode === "restricted" && args.access === "public") {
-      return failTool("Making a restricted site public requires the owner in Sites; agents can only keep restricted access or update readers.");
+    const live = existing && existing.status !== "removed" ? existing : null;
+    // D3 human-only boundaries, and B2: on an existing site an agent keeps
+    // its access and reader list; a new version is published to the same
+    // readers. Choosing who can read an existing site is the owner's, in Sites.
+    let desiredAccess;
+    if (live) {
+     const readers = JSON.parse(live.access_emails || "[]");
+     if (live.access_mode === "restricted" && args.access === "public") {
+      return failTool("Making a restricted site public requires the owner in Sites; agents keep the site's access and readers.");
      }
-     if (args.projectName && args.projectName !== existing.project && existing.identity) {
+     if (args.access !== undefined && args.access !== live.access_mode) {
+      return failTool("Changing who can open an existing site requires the owner in Sites; agents keep the site's access and readers.");
+     }
+     if (args.emails !== undefined) {
+      const same = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+      const asked = args.emails.map((e) => String(e).trim().toLowerCase());
+      if (!same(asked, readers.map((e) => String(e).toLowerCase()))) {
+       return failTool("Changing an existing site's readers requires the owner in Sites; agents keep the site's access and readers.");
+      }
+     }
+     if (args.projectName && args.projectName !== live.project && live.identity) {
       return failTool("Changing an existing site's address requires the owner in Sites.");
      }
+    } else if (args.access !== undefined || args.emails !== undefined) {
+     desiredAccess = { mode: args.access || "public", emails: args.emails || [] };
     }
-    const src = await this.source(artifactId);
     const targetVersion = Number.isInteger(args.version) && args.version >= 1 ? args.version : src?.artifact?.liveVersion;
     if (!targetVersion) return failTool("Artifact has no live version to publish.");
-    const desiredAccess =
-     args.access !== undefined || args.emails !== undefined
-      ? { mode: args.access || existing?.access_mode || "public", emails: args.emails || (existing ? JSON.parse(existing.access_emails) : []) }
-      : undefined;
     const prepared = await this.prepare({
      action: "publish",
      artifactId,
@@ -1386,11 +1502,10 @@ export class PagesService {
      access: desiredAccess,
      analytics: args.analytics,
      actor,
-     actorName: agentName,
+     actorName: "",
     });
-    const warnMessages = (prepared.warnings || [])
-     .filter(() => (desiredAccess?.mode || existing?.access_mode || "public") === "public")
-     .map((w) => w.message);
+    // D11: key-format warnings for every site, public or restricted (B8).
+    const warnMessages = (prepared.warnings || []).map((w) => w.message);
     if (prepared.unchanged) {
      const pub = this.pub(prepared.publication.id);
      const out = {
@@ -1428,6 +1543,7 @@ export class PagesService {
     if (!artifactId || !Number.isInteger(targetVersion) || targetVersion < 1) {
      return failTool("artifact and a positive integer version are required.");
     }
+    if (!(await scopedSource(artifactId))) return failTool(NOT_HERE(artifactId));
     const existing = this.db.prepare("SELECT * FROM publications WHERE artifact_id=?").get(artifactId);
     if (!existing || existing.status !== "published") {
      return failTool("This artifact has no active published site to restore.");
@@ -1437,7 +1553,7 @@ export class PagesService {
      publicationId: existing.id,
      version: targetVersion,
      actor,
-     actorName: agentName,
+     actorName: "",
     });
     await this.confirm(prepared.id, prepared.revision);
     const settled = await this.waitForOperation(prepared.id);

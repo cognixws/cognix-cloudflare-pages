@@ -63,7 +63,7 @@
         "tools": [
           {
             "id": "sites",
-            "description": "List up to 50 Cloudflare Pages sites for the connected account, optionally filtered by state.",
+            "description": "List up to 50 Cloudflare Pages sites of this workspace's artifacts for the connected account, optionally filtered by state.",
             "inputSchema": {
               "type": "object",
               "properties": {
@@ -84,7 +84,7 @@
           },
           {
             "id": "publish",
-            "description": "Publish or update a standalone page or design artifact on Cloudflare Pages. Idempotent: the same artifact keeps its address. Removing a site, making a restricted site public and changing an existing address require the owner in Sites.",
+            "description": "Publish or update a standalone page or design artifact of this workspace on Cloudflare Pages. Idempotent: the same artifact keeps its address, access and readers. A new site may start public or restricted; changing an existing site's access or readers, removing a site and changing its address require the owner in Sites.",
             "inputSchema": {
               "type": "object",
               "properties": {
@@ -105,7 +105,7 @@
                     "public",
                     "restricted"
                   ],
-                  "description": "Who can open the site; making an existing restricted site public is refused."
+                  "description": "Who can open a new site; an existing site keeps its access (changing it is refused)."
                 },
                 "emails": {
                   "type": "array",
@@ -115,7 +115,7 @@
                     "maxLength": 254
                   },
                   "maxItems": 50,
-                  "description": "Allowed reader email addresses when access is restricted."
+                  "description": "Reader email addresses for a new restricted site; an existing site keeps its readers (changing them is refused)."
                 },
                 "analytics": {
                   "type": "boolean",

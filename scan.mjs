@@ -59,7 +59,21 @@ function isScannableFile(file) {
 
 // scanBundleForSecrets inspects text assets in a SiteBundle and returns up to
 // maxFindings masked location/prefix hints. Never returns secret material and
-// never blocks publication (D11).
+// never blocks publication (D11). The whole text of every file is scanned,
+// whatever its line length or size (minified JavaScript included): each rule
+// runs over 64 KiB windows that overlap by 1 KiB, so a key across a window
+// edge is still found, and the regexes never see one huge string at once.
+const WINDOW = 64 << 10;
+const OVERLAP = 1 << 10;
+
+function lineAt(text, index, cache) {
+ // Count newlines incrementally from the last position asked for.
+ if (index < cache.pos) { cache.pos = 0; cache.line = 1; }
+ for (let i = cache.pos; i < index; i++) if (text.charCodeAt(i) === 10) cache.line++;
+ cache.pos = index;
+ return cache.line;
+}
+
 export function scanBundleForSecrets(bundle, maxFindings = 5) {
   const warnings = [];
   const files = Array.isArray(bundle?.files) ? bundle.files : [];
@@ -72,25 +86,38 @@ export function scanBundleForSecrets(bundle, maxFindings = 5) {
     } catch {
       continue;
     }
-    if (buf.length > 2 * 1024 * 1024 || buf.includes(0)) continue;
-    const lines = buf.toString("utf8").split(/\r?\n/);
-    for (let i = 0; i < lines.length && warnings.length < maxFindings; i++) {
-      const line = lines[i];
-      if (!line || line.length > 16384) continue;
+    if (buf.includes(0)) continue;
+    const text = buf.toString("utf8");
+    const hits = new Map(); // start index -> {rule, match}
+    for (let from = 0; from < text.length; from += WINDOW - OVERLAP) {
+      const chunk = text.slice(from, from + WINDOW);
       for (const rule of SECRET_RULES) {
-        const m = rule.re.exec(line);
-        if (m) {
-          const prefix = rule.prefix(m);
-          warnings.push({
-            file: file.path,
-            line: i + 1,
-            label: rule.label,
-            prefix,
-            message: `Possible key format in ${file.path}:${i + 1} (${rule.label} ${prefix})`,
-          });
-          break;
+        const re = new RegExp(rule.re.source, rule.re.flags.includes("g") ? rule.re.flags : rule.re.flags + "g");
+        let m;
+        while ((m = re.exec(chunk))) {
+          const at = from + m.index;
+          if (!hits.has(at)) hits.set(at, { rule, m });
+          if (m[0].length === 0) re.lastIndex++;
         }
       }
+      if (from + WINDOW >= text.length) break;
+    }
+    const cache = { pos: 0, line: 1 };
+    const seenLines = new Set();
+    for (const at of [...hits.keys()].sort((a, b) => a - b)) {
+      if (warnings.length >= maxFindings) break;
+      const line = lineAt(text, at, cache);
+      if (seenLines.has(line)) continue;
+      seenLines.add(line);
+      const { rule, m } = hits.get(at);
+      const prefix = rule.prefix(m);
+      warnings.push({
+        file: file.path,
+        line,
+        label: rule.label,
+        prefix,
+        message: `Possible key format in ${file.path}:${line} (${rule.label} ${prefix})`,
+      });
     }
   }
   return warnings;

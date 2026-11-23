@@ -14,200 +14,7 @@ import { PagesService } from "../service.mjs";
 import { DASHBOARD_PERMISSION_LABELS, scanBundleForSecrets, shortSlug, tokenTemplateURL } from "../scan.mjs";
 import { startFakeCloudflare } from "./fake-cloudflare.mjs";
 
-const ACCT_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const ACCT_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-function applyMigrations(db) {
- const migDir = new URL("../migrations/", import.meta.url);
- for (const file of readdirSync(migDir).sort()) {
-  if (file.endsWith(".sql")) {
-   db.exec(readFileSync(new URL(file, migDir), "utf8"));
-  }
- }
- return db;
-}
-
-function makeBundle(artifactId, version, files) {
- const entries = files.map((f) => {
-  const buf = Buffer.from(f.content, "utf8");
-  return {
-   path: f.path,
-   mime: f.mime || "text/html",
-   sha256: createHash("sha256").update(buf).digest("hex"),
-   data: buf.toString("base64"),
-  };
- });
- const digest =
-  "sha256:" +
-  createHash("sha256")
-   .update(JSON.stringify(entries.map((e) => [e.path, e.sha256])))
-   .digest("hex");
- return { artifactId, version, digest, files: entries };
-}
-
-function createFakeHost(initial = {}) {
- const settings = {
-  account_id: ACCT_A,
-  api_token: "cfut_fake_valid_token",
-  access_api_token: "cfat_fake_access_token",
-  secretsUnreadable: false,
-  ...(initial.settings || {}),
- };
- const inboxNotes = [];
- const events = [];
- const artifacts = new Map();
-
- function putArtifact(art, bundles = {}) {
-  artifacts.set(art.id, { meta: art, bundles });
- }
-
- putArtifact(
-  {
-   id: "q3-report",
-   title: "Q3 Revenue Report",
-   kind: "page",
-   liveVersion: 2,
-   versions: [
-    { n: 2, kind: "page", author: "a-writer", authorName: "Writer", files: [{ path: "index.html" }] },
-    { n: 1, kind: "page", author: "a-writer", authorName: "Writer", files: [{ path: "index.html" }] },
-   ],
-  },
-  {
-   1: makeBundle("q3-report", 1, [{ path: "index.html", content: "<!doctype html><h1>Q3 v1</h1>" }]),
-   2: makeBundle("q3-report", 2, [{ path: "index.html", content: "<!doctype html><h1>Q3 v2</h1>" }]),
-  },
- );
-
- putArtifact(
-  {
-   id: "checkout-flow",
-   title: "Checkout Flow",
-   kind: "design",
-   liveVersion: 1,
-   versions: [
-    {
-     n: 1,
-     kind: "design",
-     author: "a-designer",
-     authorName: "Designer",
-     files: [{ path: "index.html" }, { path: "screens/cart.html" }],
-    },
-   ],
-  },
-  {
-   1: makeBundle("checkout-flow", 1, [
-    { path: "index.html", content: "<!doctype html><title>Checkout Design</title>" },
-    { path: "screens/cart.html", content: "<!doctype html><main>Cart screen</main>" },
-   ]),
-  },
- );
-
- putArtifact(
-  {
-   id: "stateful-app",
-   title: "Workspace Tracker",
-   kind: "page",
-   liveVersion: 1,
-   versions: [
-    {
-     n: 1,
-     kind: "page",
-     capabilities: ["state", "picode"],
-     author: "a-builder",
-     authorName: "Builder",
-     files: [{ path: "index.html" }],
-    },
-   ],
-  },
-  {},
- );
-
- putArtifact(
-  {
-   id: "arch-doc",
-   title: "Architecture Notes",
-   kind: "document",
-   liveVersion: 1,
-   versions: [{ n: 1, kind: "document", files: [{ path: "README.md" }] }],
-  },
-  {},
- );
-
- putArtifact(
-  {
-   id: "broken-page",
-   title: "Broken Landing",
-   kind: "page",
-   liveVersion: 1,
-   versions: [{ n: 1, kind: "page", author: "a-builder", authorName: "Builder", files: [{ path: "app.js" }] }],
-  },
-  {},
- );
-
- putArtifact(
-  {
-   id: "key-leak-page",
-   title: "Partner Demo",
-   kind: "page",
-   liveVersion: 1,
-   versions: [{ n: 1, kind: "page", files: [{ path: "index.html" }, { path: "config.js" }] }],
-  },
-  {
-   1: makeBundle("key-leak-page", 1, [
-    { path: "index.html", content: "<!doctype html><h1>Demo</h1><script src='config.js'></script>" },
-    {
-     path: "config.js",
-     mime: "text/javascript",
-     content: 'const TOKEN = "cfut_SuperSecretValue1234567890";\nconst OPENAI = "sk-proj-9876543210abcdefghij";\n',
-    },
-   ]),
-  },
- );
-
- async function host(path, _limit, body) {
-  if (path === "/settings") {
-   return {
-    values: { account_id: settings.account_id },
-    secrets: { api_token: settings.api_token, access_api_token: settings.access_api_token },
-    secretsUnreadable: Boolean(settings.secretsUnreadable),
-   };
-  }
-  if (path === "/events") {
-   events.push(body);
-   return { ok: true };
-  }
-  if (path === "/inbox") {
-   inboxNotes.push(body);
-   return { id: `inb-${inboxNotes.length}` };
-  }
-  if (path === "/artifacts") {
-   return {
-    artifacts: [...artifacts.values()].map(({ meta }) => ({
-     id: meta.id,
-     title: meta.title,
-     kind: meta.kind,
-     liveVersion: meta.liveVersion,
-    })),
-   };
-  }
-  const siteMatch = /^\/artifacts\/([^/]+)\/versions\/(\d+)\/site$/.exec(path);
-  if (siteMatch) {
-   const entry = artifacts.get(decodeURIComponent(siteMatch[1]));
-   const b = entry?.bundles?.[Number(siteMatch[2])];
-   if (!b) throw new RemoteError("Artifact version has no index.html static entry.", 422);
-   return b;
-  }
-  if (path.startsWith("/artifacts/")) {
-   const id = decodeURIComponent(path.slice(11));
-   const entry = artifacts.get(id);
-   if (!entry) throw new RemoteError("Artifact not found.", 404);
-   return { artifact: entry.meta, versions: entry.meta.versions };
-  }
-  throw new RemoteError("Unknown host route " + path, 404);
- }
-
- return { settings, inboxNotes, events, artifacts, putArtifact, host };
-}
+import { ACCT_A, ACCT_B, CTX, applyMigrations, makeBundle, createFakeHost } from "./v2-host.mjs";
 
 test("D7 & D8 & D11 helpers: short slugs, token URL labels, and non-blocking secret scan without echoing secrets", () => {
  assert.equal(shortSlug("Q3 Revenue Report!", "art-1234"), "q3-revenue-report");
@@ -240,12 +47,6 @@ test("D7 & D8 & D11 helpers: short slugs, token URL labels, and non-blocking sec
 test("D8 settingsCheck, 401/403 Reconnect state, and D13 backup-restore reconnect & account isolation", async (t) => {
  const fake = await startFakeCloudflare();
  t.after(() => fake.close());
- const prevEnv = process.env.CLOUDFLARE_PAGES_TEST_API_URL;
- process.env.CLOUDFLARE_PAGES_TEST_API_URL = fake.url;
- t.after(() => {
-  if (prevEnv === undefined) delete process.env.CLOUDFLARE_PAGES_TEST_API_URL;
-  else process.env.CLOUDFLARE_PAGES_TEST_API_URL = prevEnv;
- });
 
  const h = createFakeHost();
  const db = applyMigrations(new DatabaseSync(":memory:"));
@@ -281,10 +82,9 @@ test("D8 settingsCheck, 401/403 Reconnect state, and D13 backup-restore reconnec
  // Publish a site in ACCT_A via agent tool, then test account switch & backup-restore reconnect.
  const pubRes = await svc.runTool({
   protocol: "picode-tools/1",
-  capability: "pages",
+  capability: "pages", context: CTX,
   tool: "publish",
   arguments: { artifact: "q3-report", version: 1 },
-  context: { agent: "a-writer", agentName: "Writer" },
  });
  assert.equal(pubRes.isError, undefined);
  assert.equal(pubRes.structuredContent.status, "live");
@@ -305,7 +105,7 @@ test("D8 settingsCheck, 401/403 Reconnect state, and D13 backup-restore reconnec
  assert.equal(revOther.refusal.code, "other-account");
  const agentSitesOther = await svc.runTool({
   protocol: "picode-tools/1",
-  capability: "pages",
+  capability: "pages", context: CTX,
   tool: "sites",
   arguments: {},
  });
@@ -374,7 +174,7 @@ test("D9, D10, D11, D12 & D3: Direct Upload, pruned Restore fallback, >100 deplo
  const initDb = applyMigrations(new DatabaseSync(dbPath));
  initDb.close();
 
- const proc = spawn(process.execPath, [join(repoRoot, "server.mjs")], {
+ const proc = spawn(process.execPath, [join(repoRoot, "test", "serve-fake.mjs")], {
   env: {
    ...process.env,
    PICODE_URL: `http://127.0.0.1:${hostPort}`,
@@ -383,7 +183,7 @@ test("D9, D10, D11, D12 & D3: Direct Upload, pruned Restore fallback, >100 deplo
    PICODE_EXT_PORT: String(extPort),
    PICODE_EXT_DB: dbPath,
    PICODE_EXT_DATA: tmpDir,
-   CLOUDFLARE_PAGES_TEST_API_URL: fake.url,
+   CLOUDFLARE_PAGES_FAKE_API_URL: fake.url,
   },
   stdio: ["ignore", "pipe", "pipe"],
  });
@@ -479,7 +279,8 @@ test("D9, D10, D11, D12 & D3: Direct Upload, pruned Restore fallback, >100 deplo
  assert.equal(designPub.isError, undefined);
  assert.equal(designPub.structuredContent.url, "https://checkout-flow.pages.dev/");
  assert.equal(h.inboxNotes.length, 1, "agent publish posts non-blocking Updates FYI to Inbox");
- assert.match(h.inboxNotes[0].title, /Designer published version 1 of Checkout Flow/);
+ assert.match(h.inboxNotes[0].title, /^An agent published version 1 of Checkout Flow/);
+ assert.ok(!h.inboxNotes[0].title.includes("a-designer"), "the FYI never names an agent by raw id");
 
  // D11 non-blocking secret scan on agent publish returns warnings[] without blocking:
  const warnPub = await execTool("publish", { artifact: "key-leak-page" }, "a-helper", "Helper");
@@ -516,23 +317,48 @@ test("D9, D10, D11, D12 & D3: Direct Upload, pruned Restore fallback, >100 deplo
  assert.equal(q3AfterRestore.version, 1);
  assert.equal(q3AfterRestore.undoVersion, 2, "undoVersion remembers v2 after restoring v1");
 
- // D3 human-only boundaries:
- const privPub = await execTool("publish", {
+ // D3 human-only boundaries. B2: an agent cannot restrict an existing public
+ // site or choose its readers; a new site may start restricted.
+ const restrictExisting = await execTool("publish", {
   artifact: "q3-report",
   version: 2,
   access: "restricted",
   emails: ["reader@example.com"],
  });
- assert.equal(privPub.isError, undefined);
+ assert.equal(restrictExisting.isError, true);
+ assert.match(restrictExisting.content[0].text, /requires the owner in Sites/i);
+
+ const privPub = await execTool("publish", {
+  artifact: "private-notes",
+  version: 1,
+  access: "restricted",
+  emails: ["reader@example.com"],
+ });
+ assert.equal(privPub.isError, undefined, privPub.content?.[0]?.text);
  assert.equal(privPub.structuredContent.access, "restricted");
 
  const flipPublic = await execTool("publish", {
-  artifact: "q3-report",
-  version: 2,
+  artifact: "private-notes",
+  version: 1,
   access: "public",
  });
  assert.equal(flipPublic.isError, true);
  assert.match(flipPublic.content[0].text, /requires the owner in Sites/i);
+
+ const addReader = await execTool("publish", {
+  artifact: "private-notes",
+  version: 2,
+  access: "restricted",
+  emails: ["reader@example.com", "intruder@example.net"],
+ });
+ assert.equal(addReader.isError, true, "an agent cannot grant a new address on a restricted site");
+ assert.match(addReader.content[0].text, /readers requires the owner in Sites/i);
+
+ const keepReaders = await execTool("publish", { artifact: "private-notes", version: 2 });
+ assert.equal(keepReaders.isError, undefined, keepReaders.content?.[0]?.text);
+ assert.equal(keepReaders.structuredContent.access, "restricted");
+ const notesPub = (await relay("/state")).body.publications.find((p) => p.artifact_id === "private-notes");
+ assert.deepEqual(notesPub.access_emails, ["reader@example.com"], "a new version keeps the existing readers");
 
  const renameAttempt = await execTool("publish", {
   artifact: "checkout-flow",
@@ -549,7 +375,7 @@ test("D9, D10, D11, D12 & D3: Direct Upload, pruned Restore fallback, >100 deplo
  const sitesRes = await execTool("sites", { filter: "private" });
  assert.equal(sitesRes.isError, undefined);
  assert.equal(sitesRes.structuredContent.sites.length, 1);
- assert.equal(sitesRes.structuredContent.sites[0].artifact, "q3-report");
+ assert.equal(sitesRes.structuredContent.sites[0].artifact, "private-notes");
 
  const statusRes = await execTool("status", { artifact: "checkout-flow" });
  assert.equal(statusRes.isError, undefined);
@@ -591,12 +417,6 @@ test("D9, D10, D11, D12 & D3: Direct Upload, pruned Restore fallback, >100 deplo
 test("Decision table: token state × deployment state × artifact kind → action", async (t) => {
  const fake = await startFakeCloudflare();
  t.after(() => fake.close());
- const prevEnv = process.env.CLOUDFLARE_PAGES_TEST_API_URL;
- process.env.CLOUDFLARE_PAGES_TEST_API_URL = fake.url;
- t.after(() => {
-  if (prevEnv === undefined) delete process.env.CLOUDFLARE_PAGES_TEST_API_URL;
-  else process.env.CLOUDFLARE_PAGES_TEST_API_URL = prevEnv;
- });
 
  const rows = [
   { token: "missing", deploy: "new", kind: "page", op: "publish", expect: "blocked-not-configured" },
@@ -664,7 +484,7 @@ test("Decision table: token state × deployment state × artifact kind → actio
    if (row.deploy !== "new") {
     const p1 = await svc.runTool({
      protocol: "picode-tools/1",
-     capability: "pages",
+     capability: "pages", context: CTX,
      tool: "publish",
      arguments: { artifact: artId, version: 1, projectName: chosenProj },
     });
@@ -674,7 +494,7 @@ test("Decision table: token state × deployment state × artifact kind → actio
 
     const p2 = await svc.runTool({
      protocol: "picode-tools/1",
-     capability: "pages",
+     capability: "pages", context: CTX,
      tool: "publish",
      arguments: { artifact: artId, version: 2 },
     });
@@ -694,20 +514,20 @@ test("Decision table: token state × deployment state × artifact kind → actio
 
    if (row.expect === "blocked-not-configured") {
     assert.equal((await svc.connectionState()).status, "not-configured");
-    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", tool: "publish", arguments: { artifact: artId, version: 1 } });
+    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", context: CTX, tool: "publish", arguments: { artifact: artId, version: 1 } });
     assert.equal(res.isError, true);
     return;
    }
    if (row.expect === "blocked-reconnect") {
     assert.equal((await svc.connectionState()).status, "reconnect");
-    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", tool: "publish", arguments: { artifact: artId, version: 2 } });
+    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", context: CTX, tool: "publish", arguments: { artifact: artId, version: 2 } });
     assert.equal(res.isError, true);
     return;
    }
    if (row.expect === "blocked-expired") {
     const res = await svc.runTool({
      protocol: "picode-tools/1",
-     capability: "pages",
+     capability: "pages", context: CTX,
      tool: row.op,
      arguments: { artifact: artId, version: 1 },
     });
@@ -719,7 +539,7 @@ test("Decision table: token state × deployment state × artifact kind → actio
     const rev = await svc.review(artId, 1);
     assert.equal(rev.publishable, false);
     assert.equal(rev.refusal.code, "local-capabilities");
-    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", tool: "publish", arguments: { artifact: artId, version: 1 } });
+    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", context: CTX, tool: "publish", arguments: { artifact: artId, version: 1 } });
     assert.equal(res.isError, true);
     return;
    }
@@ -727,14 +547,14 @@ test("Decision table: token state × deployment state × artifact kind → actio
     const rev = await svc.review(artId, 1);
     assert.equal(rev.publishable, false);
     assert.equal(rev.refusal.code, "unsupported-kind");
-    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", tool: "publish", arguments: { artifact: artId, version: 1 } });
+    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", context: CTX, tool: "publish", arguments: { artifact: artId, version: 1 } });
     assert.equal(res.isError, true);
     return;
    }
    if (row.expect === "published-direct-upload") {
     const res = await svc.runTool({
      protocol: "picode-tools/1",
-     capability: "pages",
+     capability: "pages", context: CTX,
      tool: "publish",
      arguments: { artifact: artId, version: 1, projectName: chosenProj },
     });
@@ -744,7 +564,7 @@ test("Decision table: token state × deployment state × artifact kind → actio
    }
    if (row.expect === "restored-cloudflare-rollback") {
     const beforeReqs = fake.state.requests.length;
-    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", tool: "restore", arguments: { artifact: artId, version: 1 } });
+    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", context: CTX, tool: "restore", arguments: { artifact: artId, version: 1 } });
     assert.equal(res.isError, undefined, res.content?.[0]?.text);
     const usedRollback = fake.state.requests.slice(beforeReqs).some((r) => r.path.endsWith(`/${v1DepId}/rollback`));
     assert.equal(usedRollback, true, "uses Cloudflare /rollback when target deployment is still retained");
@@ -752,7 +572,7 @@ test("Decision table: token state × deployment state × artifact kind → actio
    }
    if (row.expect === "restored-local-reupload") {
     const beforeReqs = fake.state.requests.length;
-    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", tool: "restore", arguments: { artifact: artId, version: 1 } });
+    const res = await svc.runTool({ protocol: "picode-tools/1", capability: "pages", context: CTX, tool: "restore", arguments: { artifact: artId, version: 1 } });
     assert.equal(res.isError, undefined, res.content?.[0]?.text);
     const newReqs = fake.state.requests.slice(beforeReqs);
     assert.equal(newReqs.some((r) => r.path.endsWith("/rollback")), false);
