@@ -10,19 +10,37 @@ export function assetHash(file) {
  return hash(file.data + extname(file.path).substring(1)).toString("hex").slice(0,32);
 }
 
+// Loopback-only API base for tests and scratch QA against a local HTTP stub.
+// It reaches the client only through the constructor (test/serve-fake.mjs);
+// production never reads it from the environment, which the daemon passes to
+// extensions. A non-loopback host is refused, so credentials never leave
+// this machine.
+export function resolveApiBase(override) {
+ if (!override) return { apiBase: "https://api.cloudflare.com/client/v4", edgeBase: "" };
+ let u;
+ try { u = new URL(override); } catch { throw new Error("Invalid test API URL."); }
+ if (u.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(u.hostname) || u.username || u.password) {
+  throw new Error("The test API URL must use loopback HTTP.");
+ }
+ const origin = u.origin;
+ return { apiBase: origin + "/client/v4", edgeBase: origin + "/__edge/" };
+}
+
 // Transport is injected only in tests. Production fixes HTTPS/API origin and
 // refuses redirects, so a credential never follows a different destination.
 export class Cloudflare {
- constructor(account, token, transport = fetch) {
+ constructor(account, token, transport = fetch, apiOverride = "") {
   if (!/^[a-fA-F0-9]{32}$/.test(account) || !token) throw new RemoteError("Configure the Cloudflare account and API token.",409);
-  this.account=account;this.token=token;this.transport=transport;
+  const { apiBase, edgeBase } = resolveApiBase(apiOverride);
+  this.account=account;this.token=token;this.transport=transport;this.apiBase=apiBase;this.edgeBase=edgeBase;
  }
  projectPath(project) { return `/accounts/${this.account}/pages/projects/${encodeURIComponent(project)}`; }
+ edgeURL(hostname) { return this.edgeBase ? `${this.edgeBase}${encodeURIComponent(hostname)}/` : `https://${hostname}/`; }
  async call(path, {method="GET",body,token=this.token}={}) {
   const headers={Authorization:"Bearer "+token};
   if(body && !(body instanceof FormData)) headers["Content-Type"]="application/json";
   let res;
-  try { res=await this.transport("https://api.cloudflare.com/client/v4"+path,{method,body:body instanceof FormData?body:body===undefined?undefined:JSON.stringify(body),headers,redirect:"error",signal:AbortSignal.timeout(30_000)}); }
+  try { res=await this.transport(this.apiBase+path,{method,body:body instanceof FormData?body:body===undefined?undefined:JSON.stringify(body),headers,redirect:"error",signal:AbortSignal.timeout(30_000)}); }
   catch { throw new RemoteError("Cloudflare did not confirm the request. Check the operation before retrying."); }
   let data;try{data=await res.json();}catch{throw new RemoteError("Cloudflare returned an unreadable response.");}
   if(!res.ok || data.success===false) {
@@ -48,6 +66,7 @@ export class Cloudflare {
   throw new RemoteError("Too many deployments to review safely. Open Cloudflare to review this project.",409);
  }
  async deployment(name,id) {return (await this.call(this.projectPath(name)+"/deployments/"+encodeURIComponent(id))).result;}
+ async deleteDeployment(name,id) {await this.call(this.projectPath(name)+"/deployments/"+encodeURIComponent(id)+"?force=true",{method:"DELETE"});}
  async deploy(name,bundle,marker,onProgress=()=>{}) {
   const jwt=(await this.call(this.projectPath(name)+"/upload-token")).result?.jwt;
   if(!jwt)throw new RemoteError("Cloudflare did not issue an upload token.");

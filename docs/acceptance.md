@@ -1,5 +1,42 @@
 # Publication decision table and acceptance
 
+This document tracks automated fake-provider / scratch-browser verification versus real-account and native-device acceptance debts across releases.
+
+## v0.5.0 (Phase F1) decision table: token state × deployment state × artifact kind → action
+
+| Token state | Deployment state | Artifact kind / capabilities | Operation | Expected outcome | Evidence |
+|---|---|---|---|---|---|
+| Missing (`not-configured`) | New (0 sites) | `page` or `design` | Review / `publish` | Blocked state (`Cloudflare account not connected` → pre-filled token URL); no remote call | `test/v2-f1.test.mjs`, scratch QA |
+| Missing after backup restore (`data.db` has sites, `secrets.json` empty) | Live site in DB | `page` or `design` | Open `Sites` / `publish` | `Reconnect Cloudflare` banner (`status: "reconnect"`); existing history preserved | `test/v2-f1.test.mjs`, scratch QA |
+| Expired / 401 / 403 | New or Live | `page` or `design` | Prepare / `publish` / `restore` | Marks connection `expired`, surfaces `Update token` banner; live sites untouched | `test/v2-f1.test.mjs`, scratch QA |
+| Valid, different `account_id` | Live in other account | `page` or `design` | Open `Sites` / Review / Agent `sites` | Marked `Other account` read-only; hidden from agent `sites`; mutation refused until account switched | `test/v2-f1.test.mjs`, scratch QA |
+| Valid | New | `page` | Owner or Agent `publish` | Short slug `<title>.pages.dev` (D7), Direct Upload (D9), `Live` | `test/v2-f1.test.mjs`, scratch QA |
+| Valid | New | `design` | Owner or Agent `publish` | Exported multi-artboard static bundle uploaded to `<title>.pages.dev`, `Live` | `test/v2-f1.test.mjs`, scratch QA |
+| Valid | New | `page` with key-like string (`cfut_…`, `sk-…`) | Review / Agent `publish` | Non-blocking warning (`Inspect artifact` secondary, `Publish vN` primary; `warnings[]` on tool), raw secret never echoed | `test/v2-f1.test.mjs`, scratch QA |
+| Valid | New | `page` declaring `state`/`files`/`picode` | Open Review / Agent `publish` | Refused (`Version N uses COGNIX[WS] data` + `Ask <Agent> for a standalone version`) | `test/v2-f1.test.mjs`, scratch QA |
+| Valid | New | `document` / `dashboard` / `design-system` | Artifact `⋯` menu / Direct review | Hidden from `⋯` by `C1c` (`artifactKinds: ["page","design"]`); graceful `Only pages and designs publish as sites` on direct open | `places_manifest_test.go`, `extensions.test.js`, `test/v2-f1.test.mjs`, scratch QA |
+| Valid | Live (target deployment active on Cloudflare) | `page` or `design` | Owner or Agent `restore` | Instant Cloudflare `/rollback`, records `undoVersion` | `test/v2-f1.test.mjs` |
+| Valid | Live (target deployment pruned 404 on Cloudflare) | `page` or `design` | Owner or Agent `restore` | Re-uploads immutable local COGNIX[WS] artifact version via Direct Upload, marks deployment pruned, records `undoVersion` | `test/v2-f1.test.mjs`, scratch QA |
+| Valid | Live (>100 deployments on project) | `page` or `design` | Owner `Remove…` | Batch-prunes non-canonical deployments before `DELETE /projects/{name}` | `test/v2-f1.test.mjs` |
+| Valid | Live (`restricted` access) | `page` or `design` | Agent `publish` with `access: "public"` or `projectName` rename or `remove` | Refused; human-only in `Sites` with owner confirmation | `test/v2-f1.test.mjs` |
+| Valid | Live (any access) | `page` or `design` | Agent `publish` changing `access` or `emails` of an existing site | Refused; a new version keeps the site's access and readers (B2) | `test/review-fixes.test.mjs` B2, `test/v2-f1.test.mjs` |
+| Valid | Any | Artifact of another workspace (or any workspace, for a free agent) | Agent `publish` / `restore` / `status` / `sites` | Refused or not listed: agents act only in their own workspace (B1) | `test/review-fixes.test.mjs` B1 |
+| Valid main token, refused Access token | Any | — | Save settings | Saved; `Sites` names the Access token as refused (B9) | `test/review-fixes.test.mjs` B9 |
+
+## Open acceptance debts
+
+- **Real Cloudflare account pilot (`0.5.0`)**: owner-run live verification of `settingsCheck`, pre-filled token URL in Cloudflare dashboard, `design` artifact Direct Upload, pruned-deployment local re-upload restore, >100-deployment removal, and agent `pages` tool calls against a real Cloudflare account (all development and automated QA used `test/fake-cloudflare.mjs` with zero live Cloudflare calls).
+- **Native Windows / WebView2 shell and physical phone**: scratch verification covers desktop 1440px and mobile 390px viewports in Chromium; native shell and physical-phone touch interaction remain open.
+- **Chosen project name with lost creation response**: remains held at `Check result` for manual Cloudflare inspection rather than adopting by name/timestamp.
+
+## Prior release tables (0.2.0 – 0.4.1)
+
+Migrations `001`–`005` and the lifecycle, Access (`0.3.0`), Web Analytics (`0.4.0`) and address-change (`0.4.0`) suites (`test/service.test.mjs`, `test/connection.test.mjs`, `test/access.test.mjs`, `test/analytics.test.mjs`, `test/rename.test.mjs`, `test/migration.test.mjs`) continue to run unchanged alongside `test/v2-f1.test.mjs`.
+
+The 0.2.0–0.4.1 record follows as it stood before 0.5.0 (owner approvals, decision tables and browser evidence); it is kept, not rewritten.
+
+### Lifecycle decision table (0.2.0)
+
 The owner approved the publication proposal on 2026-10-03 and independent
 repository ownership in the follow-up refactor. Generic artifact menus, scoped
 exports, instance activation and the owner-confirmation bridge belong to PiCode.
@@ -24,7 +61,7 @@ UI, build and lifecycle tests.
 Run `npm ci && npm test` in this repository. The suite covers remote effects
 with an injected transport, without Cloudflare credentials.
 
-## Browser evidence
+### Browser evidence
 
 Before extraction, scratch browser QA used the real PiCode process/bridge and a
 simulated provider: publish v1, update v2, restore v1, remove; empty, blocked,
@@ -33,7 +70,7 @@ Screenshots were read in a subagent and settled overlay audits passed.
 Desktop and phone artifact actions preserved the explicitly selected versions.
 Computed JavaScript resources need runtime acceptance.
 
-## GUI v2 browser evidence
+### GUI v2 browser evidence
 
 Scratch QA on 2026-10-03 used the real PiCode host, process relay and owner
 confirmation with a test-only Cloudflare adapter. Desktop configuration at
@@ -44,7 +81,7 @@ progress remained visible and removed sites had no dead URL actions. Screenshot
 review and settled host overlay audits passed. Remote provider calls were
 simulated; this does not establish production Cloudflare acceptance.
 
-## Open acceptance
+### Open acceptance
 
 - Real Cloudflare account: publish/update/restore/remove and verify all known URLs.
 - Native Windows/WebView2 and a physical phone.
@@ -54,7 +91,7 @@ simulated; this does not establish production Cloudflare acceptance.
 Disabling, uninstalling and local artifact deletion never implicitly delete
 remote resources. Backups restore local history; they do not undo remote effects.
 
-## Restricted browser evidence (0.3.0)
+### Restricted browser evidence (0.3.0)
 
 On 2026-10-03, the visual agent read scratch screenshots at desktop 1366×768
 and mobile 360×800 in light/dark. The real PiCode host/process/owner-confirmation
@@ -85,7 +122,7 @@ action heights 36/36/36px (`ok: true`). Screenshots:
 Access login, edge propagation, native Windows/WebView2 or physical-phone
 acceptance. Release/installation receipts are recorded separately.
 
-## GUI v2 connection decision table
+### GUI v2 connection decision table
 
 | Conditions | Action/status | Evidence |
 |---|---|---|
@@ -102,7 +139,7 @@ Drop's input-to-URL path, Cloudflare Direct Upload, Vercel per-site deployment
 history, and PiCode's existing Cursor density/tokens. The owner-approved proposal
 is PiCode artifact `cloudflare-pages-gui-v2-benchmar-4b209f`.
 
-## Restricted access decision table (0.3.0)
+### Restricted access decision table (0.3.0)
 
 | Conditions | Action | Evidence |
 |---|---|---|
@@ -134,7 +171,7 @@ No core refactor or new host permission is required for this release.
 The final suite passed 48 tests; the Access 403 cleanup recovery test covers the
 post-Pages-delete uncertainty boundary separately from browser geometry QA.
 
-## Web Analytics decision table (0.4.0)
+### Web Analytics decision table (0.4.0)
 
 | Conditions | Action | Evidence |
 |---|---|---|
@@ -149,7 +186,7 @@ post-Pages-delete uncertainty boundary separately from browser geometry QA.
 | Real account, disposable project (probe 2026-10-04) | Plain-host RUM create returns tag/token; PATCH stores both; beacon injected into the deployment created after enabling; `null` clears; injection is per-deployment (clearing leaves the current publication reporting until republished); `DELETE /rum/site_info/{tag}` works as `dispose` uses it | browser session probe, this date |
 | Dashboard visit counts and an extension-driven real pilot | Still open | acceptance debt |
 
-## Address change decision table (0.4.0)
+### Address change decision table (0.4.0)
 
 | Conditions | Action | Evidence |
 |---|---|---|
@@ -162,7 +199,7 @@ post-Pages-delete uncertainty boundary separately from browser geometry QA.
 | New deployment fails | Retain the old site and record; the prepared project stays for review | `test/rename.test.mjs` |
 | Real addresses, dashboards and history | Pilot 2026-10-04: change address ran on real projects (old address retired, new address live with the beacon, dashboard link resolved); long-lived dashboard history for renamed sites still unobserved | acceptance debt |
 
-## Real pilot findings and motion rebuild (2026-10-04)
+### Real pilot findings and motion rebuild (2026-10-04)
 
 The suite passes 66 tests: the 48 from 0.3.0 unchanged, plus analytics, rename,
 migration 005 and connection-capability coverage.
@@ -185,7 +222,7 @@ returned a single page artifact while the owner route listed all 64); it did
 not reproduce on retry and is recorded for the host maintainers. The pilot
 site, artifact and simulator were removed; legacy sites were untouched.
 
-## Browser evidence (0.4.0)
+### Browser evidence (0.4.0)
 
 On 2026-10-04, scratch QA used the real PiCode host (instance `cfpages-v2`,
 0.4.0 installed from the worktree package, database version 4 confirmed after

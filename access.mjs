@@ -65,7 +65,8 @@ export class PublicationAccess {
  }
  async conflicts(cf,p,hosts){const list=await this.list(cf,p);if(list.some(app=>app.id!==p.access_app&&appHostnames(app).some(a=>hosts.some(b=>overlaps(a,b)))))throw new RemoteError('Another Access application covers this site. Review Cloudflare; existing policies will not be replaced.',409);}
  async anonymous(cf,hostname,authDomain){const target=hostname.startsWith('*.')?randomUUID().replaceAll('-','')+'.'+hostname.slice(2):hostname;
-  let res;try{res=await cf.transport('https://'+target+'/',{method:'GET',redirect:'manual',credentials:'omit',signal:AbortSignal.timeout(15_000)});}catch{throw new RemoteError('Access protection could not be verified. Check the result before publishing.');}
+  const probeURL=typeof cf.edgeURL==='function'?cf.edgeURL(target):'https://'+target+'/';
+  let res;try{res=await cf.transport(probeURL,{method:'GET',redirect:'manual',credentials:'omit',signal:AbortSignal.timeout(15_000)});}catch{throw new RemoteError('Access protection could not be verified. Check the result before publishing.');}
   let location;try{location=new URL(res.headers.get('location'));}catch{}
   if(![302,303,307,308].includes(res.status)||location?.protocol!=='https:'||location?.hostname!==authDomain||!/^\/cdn-cgi\/access\/login(?:\/|$)/.test(location.pathname)||location.username||location.password)throw new RemoteError('Access protection is not active on '+target+'. Check the result after Cloudflare has applied the policy.',409);
  }
@@ -106,7 +107,7 @@ export class PublicationAccess {
  async verifyPublic(cf,p,project){
   const hosts=accessHosts(p,project).filter(h=>!h.startsWith('*.'));
   for(const d of await cf.deployments(p.project)){const u=new URL(d.url);if(u.protocol!=='https:'||u.username||u.password||!accessHosts(p,project).some(h=>overlaps(h,u.hostname)))throw new RemoteError('Unexpected deployment URL.',409);hosts.push(u.hostname);}
-  for(const hostname of new Set(hosts)){let r;try{r=await cf.transport('https://'+hostname+'/',{method:'GET',redirect:'manual',credentials:'omit',signal:AbortSignal.timeout(15_000)});}catch{throw new RemoteError('Public access could not be verified. Check the result.');}if(r.status!==200)throw new RemoteError('Public access is not confirmed on '+hostname+'. Check the result after Cloudflare applies the change.',409);}
+  for(const hostname of new Set(hosts)){const probeURL=typeof cf.edgeURL==='function'?cf.edgeURL(hostname):'https://'+hostname+'/';let r;try{r=await cf.transport(probeURL,{method:'GET',redirect:'manual',credentials:'omit',signal:AbortSignal.timeout(15_000)});}catch{throw new RemoteError('Public access could not be verified. Check the result.');}if(r.status!==200)throw new RemoteError('Public access is not confirmed on '+hostname+'. Check the result after Cloudflare applies the change.',409);}
  }
  async remove(p,reviewed,recovery=false){if(!p.access_app){if(p.access_attempt)throw new RemoteError('An uncertain Access application needs manual review.',409);return;}
   const cf=await this.client(p),r=await this.read(cf,p);if(r){if(!reviewed||accessHash(r.shape)!==accessHash(reviewed)||r.app.name!==this.name(p))throw new RemoteError('The Access policy changed after review; it was not removed.',409);if(p.access_delete_attempt)throw new RemoteError('Access removal is uncertain. Review Cloudflare; no delete was repeated.',409);this.db.prepare('UPDATE publications SET access_delete_attempt=1 WHERE id=?').run(p.id);await cf.call(this.path(p),{method:'DELETE'});if(await this.read(cf,p))throw new RemoteError('Access removal has not been confirmed.',409);}
