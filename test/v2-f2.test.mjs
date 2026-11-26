@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-import { Cloudflare } from "../cloudflare.mjs";
+import { Cloudflare, RemoteError } from "../cloudflare.mjs";
 import { PagesService } from "../service.mjs";
 import { normalizeHostname } from "../domains.mjs";
 import { aggregate, lastSevenDays, visitsQuery } from "../visits.mjs";
@@ -137,7 +137,7 @@ test("D6 without DNS permission the record is shown instead: zone not readable, 
  await x.confirm(op1);
  await x.control({ denyZones: false, denyDnsWrite: true });
  const op2 = await x.svc.prepare({ action: "domain-add", publicationId: pub.id, hostname: "b.example.com" });
- assert.match(op2.confirmation.message, /creates the CNAME record/);
+ assert.match(op2.confirmation.message, /creates the CNAME record .* when the token may edit its DNS; otherwise Sites shows the record to add\./);
  assert.equal((await x.confirm(op2)).status, "published");
  const domains = (await x.site("q3-report")).domains;
  assert.deepEqual(domains.map((d) => [d.hostname, d.dns, d.ownedRecord]), [["a.example.com", "manual", false], ["b.example.com", "manual", false]]);
@@ -585,7 +585,7 @@ test("D4 row 13: a person's restore of an older version turns it off (said in th
  let s = await x.site("q3-report");
  assert.equal(s.version, 1);
  assert.equal(s.keepUpdated, false);
- assert.match(s.syncNote, /Turned off when version 1 replaced the latest version 2/);
+ assert.match(s.syncNote, /Turned off when version 1 was restored/);
  await x.svc.syncRound();
  await x.settle();
  assert.equal((await x.site("q3-report")).version, 1, "the round never undoes the restore");
@@ -681,3 +681,201 @@ test("0.6.0 migration keeps 0.5.x rows: Keep up to date off, no domains, no visi
 function readMigration(name) {
  return readFileSync(new URL("../migrations/" + name, import.meta.url), "utf8");
 }
+
+// ------------------------------------------- 0.6.0 review findings (fixed)
+
+test("review 1: a token that lost its DNS permission is not 'refused': domain and site removal finish and name the record left", async (t) => {
+ const x = await setup(t);
+ await x.control({ addZone: { accountId: ACCT_A, name: "example.com" } });
+ await x.publish("q3-report", 2);
+ await x.publish("checkout-flow", 1);
+ const a = await x.site("q3-report");
+ const b = await x.site("checkout-flow");
+ await x.confirm(await x.svc.prepare({ action: "domain-add", publicationId: a.id, hostname: "docs.example.com" }));
+ await x.confirm(await x.svc.prepare({ action: "domain-add", publicationId: b.id, hostname: "flow.example.com" }));
+ await x.control({ denyDnsWrite: true });
+
+ const op = await x.confirm(await x.svc.prepare({ action: "domain-remove", publicationId: a.id, hostname: "docs.example.com" }));
+ assert.equal(op.status, "removed");
+ assert.match(JSON.parse(op.warnings)[0].message, /The token cannot edit DNS in example\.com any more, so the CNAME record docs\.example\.com → q3-revenue-report\.pages\.dev was left in place\. Delete it in Cloudflare/);
+ assert.equal((await x.svc.connectionState()).status, "ready", "the main token is not marked refused");
+
+ const rm = await x.confirm(await x.svc.prepare({ action: "remove", publicationId: b.id }));
+ assert.equal(rm.status, "removed");
+ assert.match(JSON.parse(rm.warnings)[0].message, /flow\.example\.com → checkout-flow\.pages\.dev was left in place/);
+ assert.ok(x.h.inboxNotes.some((n) => /Delete a DNS record left by Checkout Flow/.test(n.title)));
+ assert.equal((await x.svc.connectionState()).status, "ready");
+});
+
+test("review 2: turning Keep up to date off on a restore is decided at prepare, so a failed artifact read cannot leave it on", async (t) => {
+ const x = await setup(t);
+ await x.publish("q3-report", 1);
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "keep", publicationId: pub.id }));
+ await x.settle();
+ const op = await x.svc.prepare({ action: "rollback", publicationId: pub.id, version: 1 });
+ assert.match(x.svc.op(op.id).keep_off, /Turned off when version 1 was restored/);
+ const source = x.svc.source.bind(x.svc);
+ x.svc.source = async () => {
+  throw new RemoteError("COGNIX[WS] is busy.", 502);
+ };
+ await x.confirm(op);
+ x.svc.source = source;
+ const s = await x.site("q3-report");
+ assert.equal(s.version, 1);
+ assert.equal(s.keepUpdated, false);
+ await x.svc.syncRound();
+ await x.settle();
+ assert.equal((await x.site("q3-report")).version, 1);
+});
+
+test("review 3: a domain add whose Check result meets a refusal fails and frees the site", async (t) => {
+ const transport = losing((url, init) => init.method === "POST" && url.endsWith("/pages/projects/q3-revenue-report/domains"));
+ const x = await setup(t, { transport });
+ await x.publish("q3-report", 2);
+ await x.publish("checkout-flow", 1);
+ const pub = await x.site("q3-report");
+ const op = await x.confirm(await x.svc.prepare({ action: "domain-add", publicationId: pub.id, hostname: "taken.partner.io" }));
+ assert.equal(op.status, "unknown");
+ // Meanwhile the name went to another site: Cloudflare now refuses it.
+ const mine = x.project("q3-revenue-report").customDomains;
+ const d = mine.get("taken.partner.io");
+ mine.delete("taken.partner.io");
+ x.project("checkout-flow").customDomains = new Map([["taken.partner.io", d]]);
+ x.svc.reconcile(op.id);
+ await x.settle();
+ const after = x.svc.op(op.id);
+ assert.equal(after.status, "failed");
+ assert.match(after.error, /Cloudflare refused taken\.partner\.io/);
+ assert.deepEqual((await x.site("q3-report")).domains, []);
+ assert.equal((await x.confirm(await x.svc.prepare({ action: "remove", publicationId: pub.id }))).status, "removed");
+});
+
+test("review 4: a dropped connection during an automatic publish is retried next round, not recorded as a refused version", async (t) => {
+ const transport = losing((url) => url.endsWith("/pages/assets/check-missing"), false);
+ const x = await setup(t, { transport });
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "keep", publicationId: pub.id }));
+ await x.settle();
+ transport.arm();
+ x.addVersion("q3-report", 3);
+ await x.svc.syncRound();
+ await x.settle();
+ let s = await x.site("q3-report");
+ assert.equal(s.version, 2);
+ assert.equal(s.syncFailedVersion, null);
+ assert.match(s.syncNote, /Version 3 could not be published just now .*Sites tries again within a minute/);
+ await x.svc.syncRound();
+ await x.settle();
+ s = await x.site("q3-report");
+ assert.equal(s.version, 3);
+ assert.equal(s.syncNote, null);
+});
+
+test("review 4b: a token refused during the upload pauses Keep up to date instead of failing the version", async (t) => {
+ let refuse = false;
+ const transport = async (url, init) => {
+  if (refuse && String(url).endsWith("/upload-token")) {
+   refuse = false;
+   return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }), { status: 403, headers: { "Content-Type": "application/json" } });
+  }
+  return fetch(url, init);
+ };
+ const x = await setup(t, { transport });
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "keep", publicationId: pub.id }));
+ await x.settle();
+ refuse = true;
+ x.addVersion("q3-report", 3);
+ await x.svc.syncRound();
+ await x.settle();
+ let s = await x.site("q3-report");
+ assert.equal(s.version, 2);
+ assert.equal(s.syncFailedVersion, null);
+ assert.equal((await x.svc.connectionState()).expired, true);
+ assert.equal((await x.svc.checkConnection()).status, "ready");
+ await x.svc.syncRound();
+ await x.settle();
+ assert.equal((await x.site("q3-report")).version, 3);
+});
+
+test("review 5: Keep up to date turned off while a round prepares is never published", async (t) => {
+ const x = await setup(t);
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "keep", publicationId: pub.id }));
+ await x.settle();
+ const prepare = x.svc.prepare.bind(x.svc);
+ x.svc.prepare = async (args) => {
+  const r = await prepare(args);
+  if (args.actor === "auto") await x.svc.setKeep(pub.id, false);
+  return r;
+ };
+ x.addVersion("q3-report", 3);
+ const deploys = x.requests(/\/deployments$/, "POST").length;
+ await x.svc.syncRound();
+ await x.settle();
+ assert.equal(x.requests(/\/deployments$/, "POST").length, deploys);
+ const s = await x.site("q3-report");
+ assert.equal(s.version, 2);
+ assert.equal(s.operations[0].status, "cancelled");
+});
+
+test("review 6: a version published by hand settles a stale waiting note and Try again", async (t) => {
+ const x = await setup(t);
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "keep", publicationId: pub.id }));
+ await x.settle();
+ x.addVersion("q3-report", 3, { capabilities: ["state"] });
+ await x.svc.syncRound();
+ await x.settle();
+ assert.equal((await x.site("q3-report")).syncFailedVersion, 3);
+ x.addVersion("q3-report", 4);
+ const op = await x.svc.prepare({ artifactId: "q3-report", version: 4 });
+ await x.confirm(op);
+ let s = await x.site("q3-report");
+ assert.equal(s.version, 4);
+ assert.equal(s.syncNote, null);
+ assert.equal(s.syncFailedVersion, null);
+ assert.equal(s.keepUpdated, true);
+});
+
+test("review 7: Sites offers Keep up to date, Add domain and Delete link only on a published site", () => {
+ const src = readFileSync(new URL("../ui/source.mjs", import.meta.url), "utf8");
+ assert.match(src, /p\.hasProject && p\.status === "published" \? renderKeepRow\(p, canMutate\)/);
+ assert.match(src, /renderDomains\(p, canMutate && p\.status === "published"\)/);
+ assert.match(src, /const canDeleteLink = linkAlive && !isCurrent && canMutate && p\.status === "published";/);
+});
+
+test("review 9: preparing the same domain on two sites answers in words, not a database error", async (t) => {
+ const x = await setup(t);
+ await x.publish("q3-report", 2);
+ await x.publish("checkout-flow", 1);
+ const [a, b] = [await x.site("q3-report"), await x.site("checkout-flow")];
+ await x.svc.prepare({ action: "domain-add", publicationId: a.id, hostname: "same.partner.io" });
+ await assert.rejects(x.svc.prepare({ action: "domain-add", publicationId: b.id, hostname: "same.partner.io" }), (e) => e instanceof RemoteError && e.status === 409 && /Another change to same\.partner\.io is in progress/.test(e.message));
+});
+
+test("review 10: removing a site resumes after a lost answer in the DNS step and deletes the project once", async (t) => {
+ const transport = losing((url, init) => init.method === "DELETE" && url.includes("/dns_records/"), false);
+ const x = await setup(t, { transport });
+ await x.control({ addZone: { accountId: ACCT_A, name: "example.com" } });
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "domain-add", publicationId: pub.id, hostname: "docs.example.com" }));
+ transport.arm();
+ const op = await x.confirm(await x.svc.prepare({ action: "remove", publicationId: pub.id }));
+ assert.equal(op.status, "unknown");
+ assert.equal(op.remote_phase, "dns");
+ assert.ok(x.project("q3-revenue-report"), "the project is still there");
+ x.svc.reconcile(op.id);
+ await x.settle();
+ assert.equal(x.svc.op(op.id).status, "removed");
+ assert.equal(x.project("q3-revenue-report"), undefined);
+ assert.equal(x.requests(new RegExp(`/accounts/${ACCT_A}/pages/projects/q3-revenue-report$`), "DELETE").length, 1);
+ assert.equal([...x.fake.state.zones.values()][0].records.size, 0);
+});

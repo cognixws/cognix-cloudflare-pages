@@ -25,14 +25,16 @@ are stale (row 5). A round runs once a minute and when Sites nudges it.
 | 3 | On | this computer | none (latest = live) | any | Nothing | `D4 rows 2 and 17` |
 | 4 | On | another computer runs the extension | any | any | The process does not run here; nothing happens on this computer | host rule (`outsideEffects`), manifest asserted in `test/package.test.mjs` |
 | 5 | On | the process moved to a computer whose records are stale (Cloudflare's production deployment is not the one recorded here) | new version | Pages: Edit | Turns off with the reason; one Inbox note; publishes nothing over the other computer's work | `D4 row 5` |
-| 6 | On | this computer | new version declares workspace capabilities, is another kind, or has no static entry | Pages: Edit | Not published; one note for that version; not retried on its own; a newer good version follows; Try again retries | `D4 row 6` |
-| 7 | On | this computer | new version | token refused (401/403) | Paused; Sites shows the token banner; one note per waiting version; resumes when the token is checked again | `D4 row 7` |
+| 6 | On | this computer | new version declares workspace capabilities, is another kind, or has no static entry | Pages: Edit | Not published; one note for that version; not retried on its own; a newer good version (automatic or by hand) settles the note; Try again retries | `D4 row 6`, `review 6` |
+| 6b | On | this computer | new version | Pages: Edit, but the connection drops or Cloudflare answers 5xx/429 mid-publish | Not recorded as refused; one "tries again" note; the next round publishes it | `review 4` |
+| 6c | On | this computer | the person turns it off while a round prepares | any | The prepared publish is cancelled, never confirmed | `review 5` |
+| 7 | On | this computer | new version | token refused (401/403), before or during the upload | Paused; Sites shows the token banner; one note per waiting version; the version is not recorded as refused; resumes when the token is checked again | `D4 row 7`, `review 4b` |
 | 8 | On | this computer | new version | no Account Analytics: Read | Publishes normally; only visits say what is missing | `D4 row 8` |
 | 9 | On | this computer | new version | no Account Settings: Edit, Web Analytics already configured on the site | Publishes (the configured beacon needs no new write); if Web Analytics was cleared outside Sites, the publish fails and row 12 applies | covered by 0.4.0 `test/analytics.test.mjs` + row 12 |
 | 10 | On | this computer | new version of a restricted site | Access token missing or Access not ready | Waits; one note; publishes once Access is ready (just after a restart, before Access is checked, it waits without a note) | `D4 row 10` |
 | 11 | On | this computer | new version while an operation on the site is prepared, running or held | any | Waits for the next round | `D4 row 11` |
 | 12 | On | this computer | new version | Pages: Edit, but Cloudflare refuses the deployment | The site keeps its version; one note; not retried on its own; Try again | `D4 row 12` |
-| 13 | On | this computer | a person or an agent restores or publishes a version older than the latest | any | Turns off in the same transaction (the confirmation and the agent's `restore` or `publish` answer say so); the round never undoes it | `D4 row 13` |
+| 13 | On | this computer | a person or an agent restores any version, or publishes a version older than the latest | any | Turns off in the same transaction as the new version, decided when the change is prepared (no second read of the artifact); the confirmation and the agent's `restore` or `publish` answer say so; the round never undoes it | `D4 row 13`, `review 2` |
 | 14 | On | this computer | the site is removed | any | Turned off with the removal | `D4 rows 14 and 15` |
 | 15 | On | this computer | new version of a site in another Cloudflare account (account switched) | other account's token | Not followed | `D4 rows 14 and 15` |
 | 16 | On | this computer | new version; Cloudflare's answer to the deployment is lost | Pages: Edit | Held at Check result with one note; no second deployment; Check result settles it by the deployment marker | `D4 row 16` |
@@ -45,14 +47,18 @@ are stale (row 5). A round runs once a minute and when Sites nudges it.
 |---|---|---|
 | Subdomain, zone in this account, token reads zones and edits DNS | Pages domain first, then a proxied CNAME to `<site>.pages.dev` (comment names the operation); Check now reads Active | `D6 zone in this account` |
 | Subdomain at another DNS provider | Pages domain only; the exact CNAME is shown with copyable cells; the background round reads Active | `D6 external DNS` |
-| Zone not readable, or DNS not writable | Falls back to the record to add; the confirmation says the token cannot edit that DNS | `D6 without DNS permission` |
+| Zone not readable | Falls back to the record to add; the confirmation says the token cannot edit that DNS | `D6 without DNS permission` |
+| Zone readable, DNS not writable | The confirmation says Sites creates the record when the token may edit its DNS, otherwise shows it; it ends showing the record | `D6 without DNS permission` |
+| The token loses DNS permission after Sites created a record | Domain or site removal still finishes; the record is left, named in the operation's warnings and one Inbox note; the main token is not marked refused | `review 1` |
+| Two changes to the same name at once | The second is refused in words (409) | `review 9` |
 | Whole domain (two labels, or a name that is its own zone), reserved names, invalid names | Refused before any effect | `D6 refusals` |
 | The name already has another DNS record | Refused; Sites never replaces a record it did not create | `D6 refusals` |
 | The name is on this or another of the sites | Refused | `D6 refusals` |
 | Restricted site; making a site with domains restricted; Change address with domains | Refused with the reason | `D6 refusals` |
 | Remove a domain | CNAME (if Sites created it and it is unchanged) deleted before the domain; a changed record is left and said so | `D6 removing a domain` |
-| Remove the site | Sites' CNAME records deleted before the project (phase `dns`, safe to repeat); the confirmation names records at other providers to delete | `D6 removing the site` |
+| Remove the site | Sites' CNAME records deleted before the project (phase `dns`, safe to repeat); the confirmation names records at other providers to delete | `D6 removing the site`, `review 10` (lost answer in the DNS step: Check result finishes, one project delete) |
 | Lost answer on the domain add | Held; Check result reads the name back: one domain, one record | `D6 a lost answer` |
+| Lost answer, then Cloudflare refuses the name on Check result | Fails, the local row goes, the site is free again | `review 3` |
 | Real zone, real validation, certificate issuance, CAA | Not exercised | owner pilot (debt) |
 
 ### Visits (D5)

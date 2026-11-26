@@ -16,6 +16,13 @@ const PUBLISHABLE_KINDS = new Set(["page", "design"]);
 const now = () => new Date().toISOString();
 const digest = (x) => createHash("sha256").update(JSON.stringify(x)).digest("hex");
 
+// A refusal that will repeat for this version (it is the version, or the
+// request, that Cloudflare or COGNIX[WS] refused), as opposed to a dropped
+// connection, a busy or failing service, or a refused token.
+function definiteRefusal(e) {
+ return e instanceof RemoteError && e.status >= 400 && e.status < 500 && ![401, 403, 408, 429].includes(e.status);
+}
+
 function identity(p) {
  return JSON.stringify({ id: p.id, created: p.created_on, name: p.name, branch: p.production_branch, source: p.source || null });
 }
@@ -655,6 +662,7 @@ export class PagesService {
     if (p.access_mode === "restricted" || p.access_app || p.access_attempt) {
      throw new RemoteError("Custom domains work on sites anyone with the link can open. This site is restricted, so it keeps its .pages.dev address.", 409);
     }
+    if (this.activeDomainOp(p.account_id, host)) throw new RemoteError(`Another change to ${host} is in progress. Finish or cancel it first.`, 409);
     const taken = this.domains.row(p.account_id, host);
     if (taken) throw new RemoteError(taken.publication_id === p.id ? `${host} is already on this site.` : `${host} is already on another of your sites.`, 409);
     if ((project.domains || []).some((d) => String(d).toLowerCase() === host)) throw new RemoteError(`${host} is already on this site in Cloudflare.`, 409);
@@ -665,6 +673,7 @@ export class PagesService {
     const host = normalizeHostname(hostname);
     const row = this.domains.row(p.account_id, host);
     if (!row || row.publication_id !== p.id) throw new RemoteError(`${host} is not a custom domain of this site.`, 404);
+    if (this.activeDomainOp(p.account_id, host)) throw new RemoteError(`Another change to ${host} is in progress. Finish or cancel it first.`, 409);
     domainPlan = { account: p.account_id, hostname: host, target: p.project + ".pages.dev", zone: row.zone_id ? { id: row.zone_id, name: row.zone_name } : null, dns: row.dns, owned: Boolean(row.dns_owned) };
    }
    // D10: each version keeps its own link; the person may delete one that is not live.
@@ -712,7 +721,6 @@ export class PagesService {
    // and falls back to re-uploading the immutable local COGNIX[WS] artifact
    // version when Cloudflare pruned the deployment (>30 days / >100 deploys).
    if (action === "rollback") {
-    if (p.keep_updated) latestVersion = Number((await this.source(p.artifact_id).catch(() => null))?.artifact?.liveVersion) || 0;
     let target = null;
     if (deployment) {
      target = this.db.prepare("SELECT * FROM deployments WHERE publication_id=? AND id=?").get(p.id, deployment);
@@ -796,10 +804,16 @@ export class PagesService {
 
    // D4: a person's publish or restore of a version older than the latest
    // turns Keep up to date off (Render's rollback rule), and says so here.
-   const keepNote =
-    p.keep_updated && !String(actor).startsWith("auto") && (action === "publish" || action === "rollback") && latestVersion && version < latestVersion
-     ? ` Keep up to date turns off, so the site stays on version ${version}.`
-     : "";
+   // A restore always turns it off (it pins a version); a publish does when
+   // the version is older than the latest. Decided here and stored on the
+   // operation, so finishing it needs no second read of the artifact.
+   const keepOff =
+    p.keep_updated && !String(actor).startsWith("auto") && (action === "rollback" || (action === "publish" && latestVersion && version < latestVersion))
+     ? action === "rollback"
+       ? `Turned off when version ${version} was restored. Turn it on again to follow new versions.`
+       : `Turned off when version ${version} replaced the latest version ${latestVersion}. Turn it on again to follow new versions.`
+     : null;
+   const keepNote = keepOff ? ` Keep up to date turns off, so the site stays on version ${version}.` : "";
    const restoreMessage = (reuploadRestore
     ? `Restore version ${version} on ${p.project}.pages.dev (re-uploaded from your local COGNIX[WS] artifact copy because Cloudflare pruned the older deployment).`
     : `Restore version ${version} on ${p.project}.pages.dev.`) + keepNote;
@@ -811,7 +825,7 @@ export class PagesService {
         title: `Add ${domainPlan.hostname} to this site?`,
         message:
          (domainPlan.dns === "auto"
-          ? `Adds ${domainPlan.hostname} to “${p.title}” (${host}) and creates the CNAME record ${domainPlan.hostname} → ${host} in the ${domainPlan.zone.name} zone.`
+          ? `Adds ${domainPlan.hostname} to “${p.title}” (${host}) and creates the CNAME record ${domainPlan.hostname} → ${host} in the ${domainPlan.zone.name} zone when the token may edit its DNS; otherwise Sites shows the record to add.`
           : domainPlan.dns === "existing"
             ? `Adds ${domainPlan.hostname} to “${p.title}” (${host}). The CNAME record ${domainPlan.hostname} → ${host} already exists in ${domainPlan.zone.name}.`
             : `Adds ${domainPlan.hostname} to “${p.title}” (${host}). Then add this record at the DNS provider of ${domainPlan.hostname}: CNAME ${domainPlan.hostname} → ${host}.${domainPlan.reason === "zone-permission" || domainPlan.reason === "dns-permission" ? " The token cannot edit this name's DNS, so Sites shows the record instead of creating it." : ""}`) +
@@ -906,7 +920,7 @@ export class PagesService {
    confirmation.revision = revision;
    this.db
     .prepare(
-     "INSERT INTO operations(id,publication_id,action,version,digest,deployment,status,confirmation,revision,snapshot,access_config,access_snapshot,analytics,actor,actor_name,warnings,domain_plan,created_at,updated_at) VALUES(?,?,?,?,?,?,'prepared',?,?,?,?,?,?,?,?,?,?,?,?)",
+     "INSERT INTO operations(id,publication_id,action,version,digest,deployment,status,confirmation,revision,snapshot,access_config,access_snapshot,analytics,actor,actor_name,warnings,domain_plan,keep_off,created_at,updated_at) VALUES(?,?,?,?,?,?,'prepared',?,?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .run(
      id,
@@ -925,6 +939,7 @@ export class PagesService {
      actorName || null,
      warnings.length ? JSON.stringify(warnings) : null,
      domainPlan ? JSON.stringify(domainPlan) : null,
+     keepOff,
      now(),
      now(),
     );
@@ -933,6 +948,9 @@ export class PagesService {
   } catch (e) {
    this.recordAuthError(e, c);
    if (undoRow) this.undoPrepareRow(undoRow);
+   if (!(e instanceof RemoteError) && /UNIQUE constraint failed/.test(String(e?.message))) {
+    throw new RemoteError("Another change to this site or domain is in progress. Finish or cancel it first.", 409);
+   }
    throw e;
   }
  }
@@ -1035,9 +1053,9 @@ export class PagesService {
   }).catch(() => {});
  }
 
- async notifyFailureFYI(id) {
+ async notifyFailureFYI(id, err = null) {
   const op = this.op(id);
-  if (op?.actor === "auto" && op.action === "publish") return this.autoFailed(op);
+  if (op?.actor === "auto" && op.action === "publish") return this.autoFailed(op, err);
   if (!op?.actor?.startsWith("agent:") || !["publish", "rollback"].includes(op.action)) return;
   const p = this.pub(op.publication_id);
   if (!p) return;
@@ -1079,24 +1097,19 @@ export class PagesService {
   const url = publicURL("https://" + project.subdomain);
   const snap = op.snapshot ? JSON.parse(op.snapshot) : null;
   const nextUndo = op.action === "rollback" && snap?.previousVersion && snap.previousVersion !== op.version ? snap.previousVersion : null;
-  // D4: when a person or an agent sets the site to a version older than the
-  // artifact's latest, Keep up to date turns off in the same transaction, so
-  // the next round never publishes the latest over their choice.
-  let keepOff = null;
-  if (this.pub(p.id)?.keep_updated && op.actor !== "auto") {
-   let latest = 0;
-   try {
-    latest = Number((await this.source(p.artifact_id))?.artifact?.liveVersion) || 0;
-   } catch {}
-   if (latest && op.version < latest) keepOff = `Turned off when version ${op.version} replaced the latest version ${latest}. Turn it on again to follow new versions.`;
-  }
+  // D4: the keep-off decision taken at prepare (op.keep_off) applies in the
+  // same transaction as the new version, so the next round never publishes
+  // the latest over a person's or an agent's choice.
+  const cur = this.pub(p.id);
   this.db.exec("BEGIN IMMEDIATE");
   try {
    this.db
     .prepare("UPDATE publications SET status='published',version=?,digest=?,deployment=?,url=?,undo_version=? WHERE id=?")
     .run(op.version, op.digest, deployment, url, nextUndo, p.id);
-   if (keepOff) this.db.prepare("UPDATE publications SET keep_updated=0,sync_note=?,sync_failed_version=NULL WHERE id=?").run(keepOff, p.id);
-   if (op.actor === "auto") this.db.prepare("UPDATE publications SET sync_note=NULL,sync_failed_version=NULL WHERE id=?").run(p.id);
+   if (op.keep_off && cur?.keep_updated) this.db.prepare("UPDATE publications SET keep_updated=0,sync_note=?,sync_failed_version=NULL WHERE id=?").run(op.keep_off, p.id);
+   // A version at or past the one waiting (by hand or automatically) settles
+   // the waiting note and Try again.
+   else if (cur?.keep_updated && (op.actor === "auto" || (cur.sync_failed_version && op.version >= cur.sync_failed_version))) this.db.prepare("UPDATE publications SET sync_note=NULL,sync_failed_version=NULL WHERE id=?").run(p.id);
    this.db
     .prepare("INSERT OR REPLACE INTO deployments(id,publication_id,operation_id,version,digest,url,created_at,project,pruned) VALUES(?,?,?,?,?,?,?,?,0)")
     .run(deployment, p.id, op.id, op.version, op.digest, publicURL(d.url), now(), p.project);
@@ -1114,7 +1127,7 @@ export class PagesService {
   let op = this.op(id);
   let p = this.pub(op.publication_id);
   const phase = op.remote_phase || op.status;
-  let effect = recovery && ["creating", "protecting", "analytics", "deploying", "verifying", "removing", "rolling-back", "unknown"].includes(op.status);
+  let effect = recovery && ["creating", "protecting", "analytics", "dns", "deploying", "verifying", "removing", "rolling-back", "unknown"].includes(op.status);
   let currentConfig = null;
   try {
    currentConfig = await this.configuration();
@@ -1130,8 +1143,9 @@ export class PagesService {
      await this.access.remove(p, op.access_snapshot ? JSON.parse(op.access_snapshot) : null, recovery);
      await this.analytics.dispose(cf, p);
      // Idempotent: a record Sites created and that still reads as written goes.
-     await this.domains.unlinkAll(cf, p);
+     const left = await this.domains.unlinkAll(cf, p);
      this.forgetRemoved(p);
+     await this.leftRecords(p, id, left);
      this.set(id, "removed");
      return;
     }
@@ -1152,10 +1166,11 @@ export class PagesService {
     }
     // D6: the CNAME records Sites created go before the project, so no name
     // is left pointing at a pages.dev address another account could claim.
+    let leftBehind = [];
     if (this.domains.list(p).some((r) => r.dns_owned)) {
      this.set(id, "dns");
      effect = true;
-     await this.domains.unlinkAll(cf, p);
+     leftBehind = await this.domains.unlinkAll(cf, p);
     }
     this.set(id, "removing");
     effect = true;
@@ -1177,6 +1192,7 @@ export class PagesService {
     await this.access.remove(p, op.access_snapshot ? JSON.parse(op.access_snapshot) : null, false);
     await this.analytics.dispose(cf, p);
     this.forgetRemoved(p);
+    await this.leftRecords(p, id, leftBehind);
     this.set(id, "removed");
     return;
    }
@@ -1197,10 +1213,15 @@ export class PagesService {
     try {
      await this.domains.add(cf, p, op, (status) => this.set(id, status));
     } catch (e) {
-     // A refused add leaves no local row behind; a lost answer keeps it for Check result.
+     // A refused add leaves no local row behind and fails, also on Check
+     // result (nothing is uncertain any more); a lost answer keeps the row.
      const plan = JSON.parse(op.domain_plan);
-     if (e instanceof RemoteError && e.status >= 400 && e.status < 500) {
-      this.db.prepare("DELETE FROM publication_domains WHERE account_id=? AND hostname=? AND publication_id=? AND domain_id IS NULL").run(plan.account, plan.hostname, p.id);
+     const row = this.domains.row(plan.account, plan.hostname);
+     if (e instanceof RemoteError && e.status >= 400 && e.status < 500 && (!row || (row.publication_id === p.id && !row.domain_id))) {
+      if (row) this.db.prepare("DELETE FROM publication_domains WHERE id=?").run(row.id);
+      this.recordAuthError(e, currentConfig);
+      this.set(id, "failed", { error: e.message });
+      return;
      }
      throw e;
     }
@@ -1214,8 +1235,8 @@ export class PagesService {
     if (row && row.publication_id === p.id) {
      this.set(id, "removing");
      effect = true;
-     const { left } = await this.domains.remove(cf, p, row);
-     if (left) this.db.prepare("UPDATE operations SET warnings=? WHERE id=?").run(JSON.stringify([{ message: `The DNS record for ${plan.hostname} was changed outside Sites, so it was left in place.` }]), id);
+     const { left, message } = await this.domains.remove(cf, p, row);
+     if (left) await this.leftRecords(p, id, [message]);
     }
     this.set(id, "removed");
     return;
@@ -1544,7 +1565,7 @@ export class PagesService {
     effect && (recovery || !(e instanceof RemoteError && [400, 401, 403, 404, 409, 422].includes(e.status) && this.op(id).remote_phase !== "protecting")) ? "unknown" : "failed",
     { error: e instanceof RemoteError ? e.message : "The operation could not complete. Check its result." },
    );
-   await this.notifyFailureFYI(id);
+   await this.notifyFailureFYI(id, e);
   }
  }
 
@@ -1554,6 +1575,15 @@ export class PagesService {
    this.launch(op.id, true);
   }
   void this.background();
+ }
+
+ // D6: records Sites created but could not delete (the token lost its DNS
+ // permission). The operation carries them as warnings and one Inbox note
+ // tells the person, so no name is left pointing at a removed address unseen.
+ async leftRecords(p, opId, messages) {
+  if (!messages?.length) return;
+  this.db.prepare("UPDATE operations SET warnings=? WHERE id=?").run(JSON.stringify(messages.map((message) => ({ message }))), opId);
+  await this.fyi(p, `Delete ${messages.length === 1 ? "a DNS record" : "DNS records"} left by ${p.title}`, messages.join(" "));
  }
 
  forgetRemoved(p) {
@@ -1655,9 +1685,17 @@ export class PagesService {
   if (!p?.keep_updated || p.status !== "published" || p.account_id !== c.account) return;
   const art = artifacts.find((a) => a.id === p.artifact_id);
   const latest = Number(art?.liveVersion) || 0;
-  if (!latest || !p.version || latest <= p.version) return;
+  if (!latest || !p.version) return;
+  if (latest <= p.version) {
+   // Up to date (by hand or not): a waiting note or Try again is stale.
+   if (p.sync_note || p.sync_failed_version) {
+    this.db.prepare("UPDATE publications SET sync_note=NULL,sync_failed_version=NULL WHERE id=? AND keep_updated=1").run(p.id);
+    await this.event();
+   }
+   return;
+  }
   if (p.sync_failed_version === latest) return;
-  if (this.db.prepare(`SELECT id FROM operations WHERE publication_id=? AND status IN (${active.map(() => "?").join(",")})`).get(p.id, ...active)) return;
+  if (this.activeOp(p.id)) return;
   if (p.access_mode === "restricted") {
    const setup = (await this.accessSetupState()).status;
    // Not checked yet (just after a restart): wait quietly for the check.
@@ -1680,12 +1718,34 @@ export class PagesService {
   try {
    prepared = await this.prepare({ action: "publish", artifactId: p.artifact_id, version: latest, actor: "auto", actorName: "Keep up to date" });
   } catch (e) {
-   // Token refused, Cloudflare busy or unreachable: the next round retries.
-   if (!(e instanceof RemoteError) || [401, 403, 429].includes(e.status) || e.status >= 500) return;
+   // Token refused, Cloudflare busy or unreachable, or the owner started a
+   // change meanwhile: the next round retries. Only a definite refusal of
+   // this version is recorded.
+   if (!definiteRefusal(e) || this.activeOp(p.id)) return;
    return this.syncFailed(p, latest, e.message);
   }
   if (prepared.unchanged) return;
+  // Turned off (or the site changed) while this round prepared: never publish.
+  const now2 = this.pub(p.id);
+  if (!now2?.keep_updated || now2.status !== "published" || now2.deployment !== p.deployment) {
+   this.cancel(prepared.id);
+   return;
+  }
   await this.confirm(prepared.id, prepared.revision);
+ }
+
+ activeDomainOp(account, hostname) {
+  return (
+   this.db
+    .prepare(
+     `SELECT id FROM operations WHERE action IN ('domain-add','domain-remove') AND status IN (${active.map(() => "?").join(",")}) AND json_extract(domain_plan,'$.account')=? AND json_extract(domain_plan,'$.hostname')=?`,
+    )
+    .get(...active, account, hostname) || null
+  );
+ }
+
+ activeOp(publicationId) {
+  return this.db.prepare(`SELECT id FROM operations WHERE publication_id=? AND status IN (${active.map(() => "?").join(",")})`).get(publicationId, ...active) || null;
  }
 
  async fyi(p, title, body) {
@@ -1716,11 +1776,19 @@ export class PagesService {
  // An automatic publish that Cloudflare refused: that version is not tried
  // again on its own (a newer version or Try again does). An uncertain one
  // holds at Check result, which blocks every later round for the site.
- async autoFailed(op) {
+ async autoFailed(op, err = null) {
   const p = this.pub(op.publication_id);
   if (!p) return;
   if (op.status === "unknown") {
    await this.fyi(p, `Keep up to date could not confirm version ${op.version} of ${p.title}`, `${op.error || "Cloudflare did not confirm the publication."} The result is uncertain; check it in Sites.`);
+   return;
+  }
+  // A dropped connection, a busy or failing Cloudflare, or a refused token is
+  // not this version's fault: the next round tries again (a refused token
+  // pauses every round until it is replaced). Cloudflare's own deployment
+  // failure (no err) and a 4xx refusal are definite.
+  if (err && !definiteRefusal(err)) {
+   await this.syncHold(p, `Version ${op.version} could not be published just now (${op.error || "Cloudflare did not answer"}); Sites tries again within a minute.`);
    return;
   }
   await this.syncFailed(p, op.version, op.error || "Cloudflare did not complete the publication.");

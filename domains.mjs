@@ -25,6 +25,11 @@ export function normalizeHostname(raw) {
  return h;
 }
 
+// The DNS permission is optional: a 403 from a zone or DNS call means "this
+// token cannot edit that DNS", never "the token is refused". It must not reach
+// the service's token check (which would pause every site).
+const denied = (e) => e instanceof RemoteError && e.status === 403;
+
 const fingerprint = (r) => createHash("sha256").update(JSON.stringify({ id: r?.id, type: r?.type, name: String(r?.name || "").toLowerCase(), content: String(r?.content || "").toLowerCase().replace(/\.$/, "") })).digest("hex");
 const pointsAt = (r, target) => r?.type === "CNAME" && String(r.content || "").toLowerCase().replace(/\.$/, "") === target;
 
@@ -120,7 +125,14 @@ export class PublicationDomains {
  async link(cf, p, op, row, plan) {
   const target = this.target(p);
   const marker = "COGNIX[WS] Sites " + op.id;
-  const records = await cf.dnsRecords(plan.zone.id, plan.hostname);
+  let records;
+  try {
+   records = await cf.dnsRecords(plan.zone.id, plan.hostname);
+  } catch (e) {
+   if (!denied(e)) throw e;
+   this.db.prepare("UPDATE publication_domains SET dns='manual' WHERE id=?").run(row.id);
+   return;
+  }
   let rec = records.find((r) => pointsAt(r, target)) || null;
   let owned = Boolean(rec && String(rec.comment || "").includes(op.id));
   let dns = rec ? (owned ? "auto" : "existing") : "manual";
@@ -133,7 +145,7 @@ export class PublicationDomains {
     owned = true;
     dns = "auto";
    } catch (e) {
-    if (!(e instanceof RemoteError && e.status === 403)) throw e;
+    if (!denied(e)) throw e;
     dns = "manual";
    }
   }
@@ -164,24 +176,49 @@ export class PublicationDomains {
  // A record changed by someone else is left alone and said so.
  async unlink(cf, row) {
   if (!row.dns_owned || !row.dns_id || !row.zone_id) return { left: false };
-  const rec = await cf.getDnsRecord(row.zone_id, row.dns_id);
   let left = false;
-  if (rec && fingerprint(rec) === row.dns_fingerprint) await cf.deleteDnsRecord(row.zone_id, row.dns_id);
-  else if (rec) left = true;
+  let reason = "";
+  try {
+   const rec = await cf.getDnsRecord(row.zone_id, row.dns_id);
+   if (rec && fingerprint(rec) === row.dns_fingerprint) await cf.deleteDnsRecord(row.zone_id, row.dns_id);
+   else if (rec) {
+    left = true;
+    reason = "changed";
+   }
+  } catch (e) {
+   // The token lost its DNS permission: the record stays and the person is told.
+   if (!denied(e)) throw e;
+   left = true;
+   reason = "permission";
+  }
   this.db.prepare("UPDATE publication_domains SET dns_owned=0,dns_id=NULL,dns_fingerprint=NULL,dns=? WHERE id=?").run(left ? "existing" : "manual", row.id);
-  return { left };
+  return { left, reason };
+ }
+
+ // What the person must do about a record Sites could not delete.
+ leftMessage(p, row, reason) {
+  const zone = row.zone_name ? ` in ${row.zone_name}` : "";
+  return reason === "permission"
+   ? `The token cannot edit DNS${zone} any more, so the CNAME record ${row.hostname} → ${this.target(p)} was left in place. Delete it in Cloudflare so the name does not point to a site that no longer claims it.`
+   : `The DNS record for ${row.hostname} was changed outside Sites, so it was left in place.`;
  }
 
  async remove(cf, p, row) {
-  const { left } = await this.unlink(cf, row);
+  const { left, reason } = await this.unlink(cf, row);
   await cf.removeDomain(p.project, row.hostname);
   this.db.prepare("DELETE FROM publication_domains WHERE id=?").run(row.id);
-  return { left };
+  return { left, message: left ? this.leftMessage(p, row, reason) : "" };
  }
 
  // Before a site's project is deleted: every record it created goes first.
+ // Returns what the person must still delete by hand.
  async unlinkAll(cf, p) {
-  for (const row of this.list(p)) await this.unlink(cf, row);
+  const messages = [];
+  for (const row of this.list(p)) {
+   const { left, reason } = await this.unlink(cf, row);
+   if (left && reason === "permission") messages.push(this.leftMessage(p, row, reason));
+  }
+  return messages;
  }
  forget(p) {
   this.db.prepare("DELETE FROM publication_domains WHERE publication_id=?").run(p.id);

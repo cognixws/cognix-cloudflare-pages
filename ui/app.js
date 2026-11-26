@@ -403,14 +403,14 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
    </section>
 
    <section class="panel" aria-label="Versions">
-    ${c.hasProject&&c.status!=="removed"?Lp(c,b):""}
+    ${c.hasProject&&c.status==="published"?Lp(c,b):""}
     <div class="panel-section">
      <div class="row spread" style="margin-bottom:8px">
       <h2>Versions</h2>
       <span class="muted small">Each version keeps its own link \xB7 Cloudflare keeps them 30 days (the latest 100)</span>
      </div>
      ${c.history&&c.history.length>0?`<div class="version-list">
-           ${c.history.map(z=>{let Z=z.id===c.deployment&&c.status!=="removed",J=!Z&&zp(c,z.version,s?.accessSetup?.status==="ready")&&b&&(z.project===c.project||z.pruned),ue=!z.pruned&&!z.linkDeleted&&z.project===c.project&&c.status!=="removed",ke=ue&&!Z&&b,P=z.url?z.url.replace(/^https?:\/\//,"").replace(/\/$/,""):"",S=z.linkDeleted?"Link deleted; restores from COGNIX[WS]":z.pruned?"Preview pruned on Cloudflare; restores from COGNIX[WS]":"";return`<div class="version-row">
+           ${c.history.map(z=>{let Z=z.id===c.deployment&&c.status!=="removed",J=!Z&&zp(c,z.version,s?.accessSetup?.status==="ready")&&b&&(z.project===c.project||z.pruned),ue=!z.pruned&&!z.linkDeleted&&z.project===c.project&&c.status!=="removed",ke=ue&&!Z&&b&&c.status==="published",P=z.url?z.url.replace(/^https?:\/\//,"").replace(/\/$/,""):"",S=z.linkDeleted?"Link deleted; restores from COGNIX[WS]":z.pruned?"Preview pruned on Cloudflare; restores from COGNIX[WS]":"";return`<div class="version-row">
               <div class="version-info">
                <div class="row">
                 <strong>Version ${z.version}</strong>
@@ -465,7 +465,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
           ${c.analytics?Vp(c):""}
          </div>
 
-         ${Jp(c,b)}
+         ${Jp(c,b&&c.status==="published")}
 
          <div class="panel-section">
           <div class="row spread">

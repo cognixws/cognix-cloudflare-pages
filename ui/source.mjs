@@ -907,7 +907,7 @@ function kindLabel(kind) {
    </section>
 
    <section class="panel" aria-label="Versions">
-    ${p.hasProject && p.status !== "removed" ? renderKeepRow(p, canMutate) : ""}
+    ${p.hasProject && p.status === "published" ? renderKeepRow(p, canMutate) : ""}
     <div class="panel-section">
      <div class="row spread" style="margin-bottom:8px">
       <h2>Versions</h2>
@@ -921,7 +921,7 @@ function kindLabel(kind) {
              const isCurrent = d.id === p.deployment && p.status !== "removed";
              const canRestoreRow = !isCurrent && restoreOffered(p, d.version, state?.accessSetup?.status === "ready") && canMutate && (d.project === p.project || d.pruned);
              const linkAlive = !d.pruned && !d.linkDeleted && d.project === p.project && p.status !== "removed";
-             const canDeleteLink = linkAlive && !isCurrent && canMutate;
+             const canDeleteLink = linkAlive && !isCurrent && canMutate && p.status === "published";
              const host = d.url ? d.url.replace(/^https?:\/\//, "").replace(/\/$/, "") : "";
              const gone = d.linkDeleted ? "Link deleted; restores from COGNIX[WS]" : d.pruned ? "Preview pruned on Cloudflare; restores from COGNIX[WS]" : "";
              return `<div class="version-row">
@@ -997,7 +997,7 @@ function kindLabel(kind) {
           ${p.analytics ? renderVisits(p) : ""}
          </div>
 
-         ${renderDomains(p, canMutate)}
+         ${renderDomains(p, canMutate && p.status === "published")}
 
          <div class="panel-section">
           <div class="row spread">
