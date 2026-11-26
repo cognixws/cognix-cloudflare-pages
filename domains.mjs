@@ -175,6 +175,8 @@ export class PublicationDomains {
  // Deletes the CNAME this extension created when it still reads as written.
  // A record changed by someone else is left alone and said so.
  async unlink(cf, row) {
+  // Marked earlier (a lost answer after it): still to report.
+  if (row.dns === "left") return { left: true, reason: "permission" };
   if (!row.dns_owned || !row.dns_id || !row.zone_id) return { left: false };
   let left = false;
   let reason = "";
@@ -191,7 +193,9 @@ export class PublicationDomains {
    left = true;
    reason = "permission";
   }
-  this.db.prepare("UPDATE publication_domains SET dns_owned=0,dns_id=NULL,dns_fingerprint=NULL,dns=? WHERE id=?").run(left ? "existing" : "manual", row.id);
+  // "left": Sites created it, could not delete it, and must say so until the
+  // row itself goes; a record someone changed is theirs ("existing").
+  this.db.prepare("UPDATE publication_domains SET dns_owned=0,dns_id=NULL,dns_fingerprint=NULL,dns=? WHERE id=?").run(reason === "permission" ? "left" : left ? "existing" : "manual", row.id);
   return { left, reason };
  }
 

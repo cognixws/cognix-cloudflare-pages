@@ -64,6 +64,7 @@ export class PagesService {
   this.domains = new PublicationDomains({ db });
   this.visits = new PublicationVisits({ db });
   this.syncing = false;
+  this.syncBackoff = new Map(); // publicationId -> { version, attempts, until }
   this.backgroundAt = 0;
   this.backgroundRunning = false;
   db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
@@ -1106,6 +1107,7 @@ export class PagesService {
    this.db
     .prepare("UPDATE publications SET status='published',version=?,digest=?,deployment=?,url=?,undo_version=? WHERE id=?")
     .run(op.version, op.digest, deployment, url, nextUndo, p.id);
+   this.syncBackoff.delete(p.id);
    if (op.keep_off && cur?.keep_updated) this.db.prepare("UPDATE publications SET keep_updated=0,sync_note=?,sync_failed_version=NULL WHERE id=?").run(op.keep_off, p.id);
    // A version at or past the one waiting (by hand or automatically) settles
    // the waiting note and Try again.
@@ -1695,6 +1697,8 @@ export class PagesService {
    return;
   }
   if (p.sync_failed_version === latest) return;
+  const wait = this.syncBackoff.get(p.id);
+  if (wait && wait.version === latest && Date.now() < wait.until) return;
   if (this.activeOp(p.id)) return;
   if (p.access_mode === "restricted") {
    const setup = (await this.accessSetupState()).status;
@@ -1788,7 +1792,12 @@ export class PagesService {
   // pauses every round until it is replaced). Cloudflare's own deployment
   // failure (no err) and a 4xx refusal are definite.
   if (err && !definiteRefusal(err)) {
-   await this.syncHold(p, `Version ${op.version} could not be published just now (${op.error || "Cloudflare did not answer"}); Sites tries again within a minute.`);
+   // The first retry is the next round; repeated failures wait 2, 4 … 60 minutes.
+   const prev = this.syncBackoff.get(p.id);
+   const attempts = prev?.version === op.version ? prev.attempts + 1 : 1;
+   const minutes = attempts <= 1 ? 0 : Math.min(60, 2 ** (attempts - 1));
+   this.syncBackoff.set(p.id, { version: op.version, attempts, until: Date.now() + minutes * 60_000 });
+   await this.syncHold(p, `Version ${op.version} could not be published just now (${op.error || "Cloudflare did not answer"}); Sites tries again shortly.`);
    return;
   }
   await this.syncFailed(p, op.version, op.error || "Cloudflare did not complete the publication.");

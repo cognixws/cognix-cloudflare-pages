@@ -41,6 +41,7 @@ test("the package exposes the v0.6.0 COGNIX[WS] installation contract", () => {
   "migrations/005_analytics.sql",
   "migrations/006_v2_f1.sql",
   "migrations/007_v2_f2.sql",
+  "migrations/008_keep_off.sql",
   "analytics.mjs",
   "domains.mjs",
   "visits.mjs",

@@ -26,7 +26,7 @@ are stale (row 5). A round runs once a minute and when Sites nudges it.
 | 4 | On | another computer runs the extension | any | any | The process does not run here; nothing happens on this computer | host rule (`outsideEffects`), manifest asserted in `test/package.test.mjs` |
 | 5 | On | the process moved to a computer whose records are stale (Cloudflare's production deployment is not the one recorded here) | new version | Pages: Edit | Turns off with the reason; one Inbox note; publishes nothing over the other computer's work | `D4 row 5` |
 | 6 | On | this computer | new version declares workspace capabilities, is another kind, or has no static entry | Pages: Edit | Not published; one note for that version; not retried on its own; a newer good version (automatic or by hand) settles the note; Try again retries | `D4 row 6`, `review 6` |
-| 6b | On | this computer | new version | Pages: Edit, but the connection drops or Cloudflare answers 5xx/429 mid-publish | Not recorded as refused; one "tries again" note; the next round publishes it | `review 4` |
+| 6b | On | this computer | new version | Pages: Edit, but the connection drops or Cloudflare answers 5xx/429 mid-publish | Not recorded as refused; one "tries again" note; the next round retries, and repeated failures wait 2, 4 … 60 minutes (in memory, reset on restart) | `review 4`, `review N3` |
 | 6c | On | this computer | the person turns it off while a round prepares | any | The prepared publish is cancelled, never confirmed | `review 5` |
 | 7 | On | this computer | new version | token refused (401/403), before or during the upload | Paused; Sites shows the token banner; one note per waiting version; the version is not recorded as refused; resumes when the token is checked again | `D4 row 7`, `review 4b` |
 | 8 | On | this computer | new version | no Account Analytics: Read | Publishes normally; only visits say what is missing | `D4 row 8` |
@@ -49,7 +49,7 @@ are stale (row 5). A round runs once a minute and when Sites nudges it.
 | Subdomain at another DNS provider | Pages domain only; the exact CNAME is shown with copyable cells; the background round reads Active | `D6 external DNS` |
 | Zone not readable | Falls back to the record to add; the confirmation says the token cannot edit that DNS | `D6 without DNS permission` |
 | Zone readable, DNS not writable | The confirmation says Sites creates the record when the token may edit its DNS, otherwise shows it; it ends showing the record | `D6 without DNS permission` |
-| The token loses DNS permission after Sites created a record | Domain or site removal still finishes; the record is left, named in the operation's warnings and one Inbox note; the main token is not marked refused | `review 1` |
+| The token loses DNS permission after Sites created a record | Domain or site removal still finishes; the record is left, named in the operation's warnings and one Inbox note (also after a lost answer and Check result); the main token is not marked refused | `review 1`, `review N1` |
 | Two changes to the same name at once | The second is refused in words (409) | `review 9` |
 | Whole domain (two labels, or a name that is its own zone), reserved names, invalid names | Refused before any effect | `D6 refusals` |
 | The name already has another DNS record | Refused; Sites never replaces a record it did not create | `D6 refusals` |

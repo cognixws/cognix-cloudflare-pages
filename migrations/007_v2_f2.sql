@@ -4,7 +4,6 @@ ALTER TABLE publications ADD COLUMN keep_updated INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE publications ADD COLUMN sync_note TEXT;
 ALTER TABLE publications ADD COLUMN sync_failed_version INTEGER;
 ALTER TABLE deployments ADD COLUMN link_deleted INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE operations ADD COLUMN keep_off TEXT;
 ALTER TABLE publication_domains ADD COLUMN zone_name TEXT;
 ALTER TABLE publication_domains ADD COLUMN dns TEXT NOT NULL DEFAULT 'manual';
 ALTER TABLE publication_domains ADD COLUMN txt_name TEXT;

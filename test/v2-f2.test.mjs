@@ -766,7 +766,7 @@ test("review 4: a dropped connection during an automatic publish is retried next
  let s = await x.site("q3-report");
  assert.equal(s.version, 2);
  assert.equal(s.syncFailedVersion, null);
- assert.match(s.syncNote, /Version 3 could not be published just now .*Sites tries again within a minute/);
+ assert.match(s.syncNote, /Version 3 could not be published just now .*Sites tries again shortly/);
  await x.svc.syncRound();
  await x.settle();
  s = await x.site("q3-report");
@@ -878,4 +878,50 @@ test("review 10: removing a site resumes after a lost answer in the DNS step and
  assert.equal(x.project("q3-revenue-report"), undefined);
  assert.equal(x.requests(new RegExp(`/accounts/${ACCT_A}/pages/projects/q3-revenue-report$`), "DELETE").length, 1);
  assert.equal([...x.fake.state.zones.values()][0].records.size, 0);
+});
+
+test("review N1: a record left by a lost DNS permission is still reported after a lost answer on the domain delete", async (t) => {
+ const transport = losing((url, init) => init.method === "DELETE" && url.endsWith("/domains/docs.example.com"), false);
+ const x = await setup(t, { transport });
+ await x.control({ addZone: { accountId: ACCT_A, name: "example.com" } });
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "domain-add", publicationId: pub.id, hostname: "docs.example.com" }));
+ await x.control({ denyDnsWrite: true });
+ transport.arm();
+ const op = await x.confirm(await x.svc.prepare({ action: "domain-remove", publicationId: pub.id, hostname: "docs.example.com" }));
+ assert.equal(op.status, "unknown");
+ x.svc.reconcile(op.id);
+ await x.settle();
+ const done = x.svc.op(op.id);
+ assert.equal(done.status, "removed");
+ assert.match(JSON.parse(done.warnings)[0].message, /docs\.example\.com → q3-revenue-report\.pages\.dev was left in place/);
+ assert.ok(x.h.inboxNotes.some((n) => /Delete a DNS record left by Q3 Revenue Report/.test(n.title)));
+});
+
+test("review N3: repeated transient failures of an automatic publish back off instead of retrying every minute", async (t) => {
+ const transport = losing((url) => url.endsWith("/pages/assets/check-missing"), false);
+ const x = await setup(t, { transport });
+ await x.publish("q3-report", 2);
+ const pub = await x.site("q3-report");
+ await x.confirm(await x.svc.prepare({ action: "keep", publicationId: pub.id }));
+ await x.settle();
+ x.addVersion("q3-report", 3);
+ const attempts = () => x.requests(/\/pages\/assets\/check-missing$/, "POST").length;
+ const start = attempts();
+ for (let i = 0; i < 2; i++) {
+  transport.arm();
+  await x.svc.syncRound();
+  await x.settle();
+ }
+ assert.equal(attempts(), start + 2, "first failure retried at the next round");
+ await x.svc.syncRound();
+ await x.settle();
+ assert.equal(attempts(), start + 2, "the second failure waits before the next try");
+ assert.equal((await x.site("q3-report")).version, 2);
+ x.svc.syncBackoff.get(pub.id).until = 0;
+ await x.svc.syncRound();
+ await x.settle();
+ assert.equal((await x.site("q3-report")).version, 3);
+ assert.equal(x.svc.syncBackoff.has(pub.id), false);
 });
