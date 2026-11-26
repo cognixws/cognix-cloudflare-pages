@@ -1,6 +1,6 @@
 # Cloudflare Pages for COGNIX[WS]
 
-An independently maintained [COGNIX[WS]](https://github.com/cognixws/picode) extension (`cloudflare-pages`, `0.5.1`) that publishes standalone `page` and `design` artifacts as Cloudflare Pages sites with public or email-restricted access, cookie-free Web Analytics, version restore and agent publishing tools.
+An independently maintained [COGNIX[WS]](https://github.com/cognixws/picode) extension (`cloudflare-pages`, `0.6.0`) that publishes standalone `page` and `design` artifacts as Cloudflare Pages sites with public or email-restricted access, custom subdomains, cookie-free Web Analytics with 7-day visits in the app, Keep up to date, version restore and agent publishing tools.
 
 ## Requirements
 
@@ -13,7 +13,9 @@ An independently maintained [COGNIX[WS]](https://github.com/cognixws/picode) ext
 2. Open **Sites** (or **Extensions → Cloudflare Pages → Settings**). Choose **Create a token** to open Cloudflare's pre-filled token page with the exact dashboard permissions:
    - `Cloudflare Pages: Edit`
    - `Account Settings: Edit`
-   - `Account Analytics: Read`
+   - `Account Analytics: Read` (the 7-day visits in Sites; without it Sites says so and everything else works)
+
+   Optional, only to let Sites create the CNAME of a custom domain whose zone is in the same account: `Zone › DNS: Edit` and `Zone › Zone: Read` for that zone. Without them Sites shows the record to add.
 3. Paste your **Cloudflare account ID** and **Cloudflare API token** in Settings and save — `settingsCheck` verifies account access on save.
 4. For **Only people I choose** (email-code login via Cloudflare Access), enable **One-time PIN** in [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) and save an optional **Cloudflare Access API token** (`Access: Apps and Policies Write`, `Access: Organizations, Identity Providers, and Groups Read`).
 
@@ -28,6 +30,14 @@ An independently maintained [COGNIX[WS]](https://github.com/cognixws/picode) ext
 - **Restore with pruned-deployment fallback**: Cloudflare Pages retains up to 100 deployments / 30 days of preview links. **Restore** uses Cloudflare's `/rollback` when the deployment is still retained and automatically re-uploads the immutable local COGNIX[WS] artifact version when Cloudflare pruned it, keeping **Undo** to switch back. Removing a site with >100 deployments batch-prunes non-canonical deployments before deleting the project.
 - **Account isolation & backup safety**: sites are isolated by `account_id` (`Other account` read-only state on account switch). Backing up `data.db` preserves full site history; when restored on a machine without `secrets.json`, **Sites** shows a **Reconnect Cloudflare** banner to re-enter the token.
 
+## Sites in 0.6.0 (v2 F2)
+
+- **Custom domains**: **Manage site › Custom domains › Add domain…** takes a subdomain you own (`docs.example.com`; a whole domain is refused). Sites adds it to the Pages project first, then creates the proxied CNAME `docs.example.com → <site>.pages.dev` when the zone is in this Cloudflare account and the token may edit its DNS; otherwise it shows that exact record to add at your DNS provider. A domain reads **Waiting for DNS** until Cloudflare validates it and issues the certificate (Sites checks every minute; **Check now** checks at once and retries a failed validation), then **Active** with **Open**. Removing a domain or the site deletes the CNAME records Sites created first, and only while they still read as Sites wrote them; for a record at another DNS provider the confirmation tells you to delete it, so the name never points at a removed site. Custom domains work on sites anyone with the link can open: a restricted site keeps its `.pages.dev` address, and a site with custom domains cannot change address or become restricted until they are removed.
+- **Visits**: the sites list shows each site's visits over the last 7 days with daily bars; **Manage site › Web Analytics** shows Visits, Page views and the days. Numbers come from Cloudflare's GraphQL Analytics API (one query for all sites, cached; at most every 30 minutes, **Refresh** at most once a minute). Cookie-free Web Analytics counts visits, not visitors, and starts with the first publication after Web Analytics is on.
+- **Keep up to date** (Manage site, above Versions; off by default): after you confirm it, each new live version of the artifact is published to the site without asking, with the site's access and settings. It turns off, and says why, when you or an agent restore or publish an older version, or when Cloudflare shows a version this computer did not publish (another computer, the dashboard). It waits while the token is refused or restricted access is not set up, and it does not retry a version that cannot be published; each case leaves one note in **Inbox › Updates** (**Try again** retries). Only one of your synced computers runs the extension (`outsideEffects`), so two computers never both publish.
+- **Each version keeps its own link**: Manage site › Versions lists every version's deployment link with **Copy link**; **Delete link…** deletes one that is not live (Restore then re-uploads that version from COGNIX[WS]).
+- The page is in English: the extension has no translations, and COGNIX[WS] does not tell extension pages the host's language.
+
 ## Agent tools (`pages` capability)
 
 When granted the **Cloudflare Pages sites** (`pages`) tool capability at launch, agents can call:
@@ -39,7 +49,7 @@ When granted the **Cloudflare Pages sites** (`pages`) tool capability at launch,
 
 **Workspace scope**: an agent reaches only artifacts of its own workspace (a free agent, only artifacts outside any workspace), although the extension itself is on for the whole instance.
 
-**Human-only controls**: removing a site, changing an existing site's access or readers (a new version keeps them), and changing an existing site's `.pages.dev` address always require the owner in **Sites**. A new site may start restricted. Every agent publish or restore, successful or failed, leaves an FYI in the Inbox.
+**Human-only controls**: removing a site, changing an existing site's access or readers (a new version keeps them), and changing an existing site's `.pages.dev` address always require the owner in **Sites**. A new site may start restricted. Every agent publish or restore, successful or failed, leaves an FYI in the Inbox. Custom domains, Keep up to date and version-link deletion are the owner's too (0.6.0 adds no agent tool); `status` reports `keepUpToDate` and active `customDomains`, and a `restore` that turns Keep up to date off says so.
 
 ## Development
 
@@ -49,7 +59,7 @@ npm run build
 npm test
 ```
 
-Tests run offline against `test/fake-cloudflare.mjs` (a local loopback HTTP fake of Cloudflare v4 Pages, RUM and Access) with zero network access and zero real credentials. See [docs/host-api.md](docs/host-api.md) and [docs/acceptance.md](docs/acceptance.md).
+Tests run offline against `test/fake-cloudflare.mjs` (a local loopback HTTP fake of Cloudflare v4 Pages, RUM, Access, zones, DNS records, Pages custom domains and GraphQL Analytics) with zero network access and zero real credentials. See [docs/host-api.md](docs/host-api.md) and [docs/acceptance.md](docs/acceptance.md).
 
 Build and test from this repository. Development dependencies are locked in
 `package-lock.json`; no PiCode checkout, sibling folder or private host import is

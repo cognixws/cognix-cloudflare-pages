@@ -1,4 +1,32 @@
-# COGNIX[WS] host contract (0.5.0)
+# COGNIX[WS] host contract (0.6.0)
+
+0.6.0 uses the same host contract as 0.5.0: `apiVersion` 26, the same
+permissions (`artifacts:read`, `artifacts:export`, `events:publish`,
+`inbox:write`), `outsideEffects: true` and the same page doors. No core change.
+
+- **Keep up to date** learns that an artifact changed by reading
+  `GET /api/ext/v1/artifacts` (`liveVersion`) once a minute in the process,
+  only while a site has it on. The host has no artifact feed for a process;
+  the page's `events` door (artifact invalidations) only nudges that round
+  sooner through `POST /sync/check`.
+- New process routes behind the relay: `POST /keep {publicationId, on:false}`
+  (turning it on is `/prepare` action `keep` and the owner confirmation),
+  `POST /keep/retry`, `POST /domains/check {publicationId, hostname}`,
+  `POST /visits/refresh`, `POST /sync/check`. `/prepare` accepts the actions
+  `domain-add` and `domain-remove` (`hostname`), `delete-link`
+  (`deployment`) and `keep`; every remote change still goes through
+  `confirm.operation(id)`.
+- `/state` adds per publication `keepUpdated`, `syncNote`,
+  `syncFailedVersion`, `domains[]` (hostname, state, DNS path, the record to
+  add) and `visits` (7 days, totals, fetched time), and a top-level `visits`
+  status (`ready`, `permission`, `unavailable`, `error`, `unchecked`).
+- Cloudflare endpoints added: Pages project domains (list, get, add, retry
+  validation, delete), `GET /zones?name=&account.id=`, zone DNS records
+  (`name.exact` list, get, create, delete), `POST /graphql`
+  (`rumPageloadEventsAdaptiveGroups`), and deployment delete. Provider messages
+  are classified, never shown.
+
+## 0.5.0 contract
 
 Requires COGNIX[WS] extension `apiVersion` 26 (`cloudflare-pages`, instance-activated, `outsideEffects: true`).
 

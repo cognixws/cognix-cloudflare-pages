@@ -2,6 +2,82 @@
 
 This document tracks automated fake-provider / scratch-browser verification versus real-account and native-device acceptance debts across releases.
 
+## 0.6.0 (Phase F2) decision tables
+
+All evidence below is automated against `test/fake-cloudflare.mjs` (loopback,
+no account, no token) in `test/v2-f2.test.mjs`, plus scratch screenshots of
+the real UI against the same fake (desktop 1280px and phone 390px, dark and
+light). The live owner pilot is still to come (open debts below).
+
+### Keep up to date × synced computers × artifact change × token permissions
+
+"This computer" is the computer COGNIX[WS] runs the extension on: with
+`outsideEffects: true` the host starts the process on one of the person's
+synced computers only (`ExtensionRunsHere`; host proof
+`TestExtensionWithOutsideEffectsRunsOnOneComputer`). Each computer keeps its
+own `data.db`, so the extension adds its own guard for a computer whose records
+are stale (row 5). A round runs once a minute and when Sites nudges it.
+
+| # | Keep up to date | Synced computers | Artifact change | Token permissions | Outcome | Evidence |
+|---|---|---|---|---|---|---|
+| 1 | Off (default) | any | new live version N | any | Nothing published; the site shows Update ready (vN) | `D4 row 1` |
+| 2 | On | this computer runs the extension | new live version N, a standalone page or design | Pages: Edit | Publishes vN without asking (actor "Keep up to date"), keeping the site's access, readers, Web Analytics and domains; no Inbox note | `D4 rows 2 and 17` |
+| 3 | On | this computer | none (latest = live) | any | Nothing | `D4 rows 2 and 17` |
+| 4 | On | another computer runs the extension | any | any | The process does not run here; nothing happens on this computer | host rule (`outsideEffects`), manifest asserted in `test/package.test.mjs` |
+| 5 | On | the process moved to a computer whose records are stale (Cloudflare's production deployment is not the one recorded here) | new version | Pages: Edit | Turns off with the reason; one Inbox note; publishes nothing over the other computer's work | `D4 row 5` |
+| 6 | On | this computer | new version declares workspace capabilities, is another kind, or has no static entry | Pages: Edit | Not published; one note for that version; not retried on its own; a newer good version follows; Try again retries | `D4 row 6` |
+| 7 | On | this computer | new version | token refused (401/403) | Paused; Sites shows the token banner; one note per waiting version; resumes when the token is checked again | `D4 row 7` |
+| 8 | On | this computer | new version | no Account Analytics: Read | Publishes normally; only visits say what is missing | `D4 row 8` |
+| 9 | On | this computer | new version | no Account Settings: Edit, Web Analytics already configured on the site | Publishes (the configured beacon needs no new write); if Web Analytics was cleared outside Sites, the publish fails and row 12 applies | covered by 0.4.0 `test/analytics.test.mjs` + row 12 |
+| 10 | On | this computer | new version of a restricted site | Access token missing or Access not ready | Waits; one note; publishes once Access is ready (just after a restart, before Access is checked, it waits without a note) | `D4 row 10` |
+| 11 | On | this computer | new version while an operation on the site is prepared, running or held | any | Waits for the next round | `D4 row 11` |
+| 12 | On | this computer | new version | Pages: Edit, but Cloudflare refuses the deployment | The site keeps its version; one note; not retried on its own; Try again | `D4 row 12` |
+| 13 | On | this computer | a person or an agent restores or publishes a version older than the latest | any | Turns off in the same transaction (the confirmation and the agent's `restore` or `publish` answer say so); the round never undoes it | `D4 row 13` |
+| 14 | On | this computer | the site is removed | any | Turned off with the removal | `D4 rows 14 and 15` |
+| 15 | On | this computer | new version of a site in another Cloudflare account (account switched) | other account's token | Not followed | `D4 rows 14 and 15` |
+| 16 | On | this computer | new version; Cloudflare's answer to the deployment is lost | Pages: Edit | Held at Check result with one note; no second deployment; Check result settles it by the deployment marker | `D4 row 16` |
+| 17 | Turning it on | this computer | a newer version is already waiting | Pages: Edit | COGNIX[WS]'s confirmation names that version; it is published right after | `D4 rows 2 and 17` |
+| 18 | Agent | any | any | any | No tool turns it on (D3); `status` reports it | `D4 row 13` |
+
+### Custom domains (D6)
+
+| Conditions | Action | Evidence |
+|---|---|---|
+| Subdomain, zone in this account, token reads zones and edits DNS | Pages domain first, then a proxied CNAME to `<site>.pages.dev` (comment names the operation); Check now reads Active | `D6 zone in this account` |
+| Subdomain at another DNS provider | Pages domain only; the exact CNAME is shown with copyable cells; the background round reads Active | `D6 external DNS` |
+| Zone not readable, or DNS not writable | Falls back to the record to add; the confirmation says the token cannot edit that DNS | `D6 without DNS permission` |
+| Whole domain (two labels, or a name that is its own zone), reserved names, invalid names | Refused before any effect | `D6 refusals` |
+| The name already has another DNS record | Refused; Sites never replaces a record it did not create | `D6 refusals` |
+| The name is on this or another of the sites | Refused | `D6 refusals` |
+| Restricted site; making a site with domains restricted; Change address with domains | Refused with the reason | `D6 refusals` |
+| Remove a domain | CNAME (if Sites created it and it is unchanged) deleted before the domain; a changed record is left and said so | `D6 removing a domain` |
+| Remove the site | Sites' CNAME records deleted before the project (phase `dns`, safe to repeat); the confirmation names records at other providers to delete | `D6 removing the site` |
+| Lost answer on the domain add | Held; Check result reads the name back: one domain, one record | `D6 a lost answer` |
+| Real zone, real validation, certificate issuance, CAA | Not exercised | owner pilot (debt) |
+
+### Visits (D5)
+
+| Conditions | Action | Evidence |
+|---|---|---|
+| Sites with Web Analytics on | One GraphQL query for all their site tags, 7 zero-filled days per site, Visits and Page views, cached in SQLite | `D5 visits` |
+| Cache younger than 30 minutes; Refresh within a minute | No query | `D5 visits` |
+| Token without Account Analytics: Read | Settings save and Check connection succeed and name it; Sites shows the sentence with Create a token / Open settings; publishing unaffected | `D5 a token without Account Analytics: Read`, `D4 row 8` |
+| Untrusted values in the query | Account, tags and dates validated before they are written into the query | `D5 the query is built from validated values only` |
+| Real `rumPageloadEventsAdaptiveGroups` fields (`count`, `sum.visits`, `dimensions.date/siteTag`, `siteTag_in`, `date_geq/leq`) | Not verified live | owner pilot (debt) |
+
+### Version links (D10)
+
+| Conditions | Action | Evidence |
+|---|---|---|
+| A version that is not live | Copy link; Delete link… (danger confirmation names the URL); absence verified; the row reads "Link deleted; restores from COGNIX[WS]" | `D10 each version keeps its own link` |
+| The live version | Delete refused | `D10` |
+| Restore after deletion | Re-uploads the immutable local version | `D10` |
+
+### Open acceptance debts (0.6.0)
+
+- **Owner pilot of 0.6.0** on the owner's account and one of the owner's domains: add a subdomain in a zone of the account (CNAME created, Active, Open), add one at an external provider (record shown, Active after DNS), Remove domain (CNAME deleted first), remove a site with a domain; 7-day visits on a site with traffic (the GraphQL field names) and with a token lacking Account Analytics: Read; Keep up to date on, publish a new artifact version, check the site follows; restore an older version and check it turns off; Delete link on an old version.
+- **Synced computers**: the stale-records guard (row 5) is tested; moving the extension between two real synced computers with Keep up to date on is not.
+
 ## 0.5.1 primary action table
 
 Which action leads in each state of a site. One rule, `siteActions()` in
