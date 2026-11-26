@@ -44,6 +44,7 @@ const ACTIVE_OPS = new Set([
  "creating",
  "protecting",
  "analytics",
+ "dns",
  "uploading",
  "deploying",
  "verifying",
@@ -63,6 +64,42 @@ function formatWhen(iso) {
  const d = new Date(iso);
  if (Number.isNaN(d.getTime())) return "—";
  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatAgo(iso) {
+ const t = Date.parse(iso || "");
+ if (!Number.isFinite(t)) return "";
+ const min = Math.round((Date.now() - t) / 60_000);
+ if (min < 1) return "just now";
+ if (min < 60) return `${min} min ago`;
+ const h = Math.round(min / 60);
+ if (h < 24) return `${h} h ago`;
+ return formatWhen(iso);
+}
+
+const numberFmt = new Intl.NumberFormat(undefined);
+function dayLabel(date) {
+ const d = new Date(date + "T12:00:00Z");
+ return Number.isNaN(d.getTime()) ? date : d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+// D5: seven daily bars, one series (Visits), one hue. Each bar names its day
+// on hover; a hidden table carries the same numbers for screen readers.
+function visitsBars(days, size = "row") {
+ if (!Array.isArray(days) || days.length === 0) return "";
+ const max = Math.max(1, ...days.map((d) => Number(d.visits) || 0));
+ const bars = days
+  .map((d) => {
+   const v = Number(d.visits) || 0;
+   const pct = v ? Math.max(8, Math.round((v / max) * 100)) : 0;
+   const tip = `${dayLabel(d.date)}: ${numberFmt.format(v)} visit${v === 1 ? "" : "s"}, ${numberFmt.format(Number(d.pageViews) || 0)} page views`;
+   return `<span class="vbar${v ? "" : " zero"}" title="${esc(tip)}"><i style="height:${pct}%"></i></span>`;
+  })
+  .join("");
+ const table = `<table class="sr-only"><caption>Visits by day</caption><tr><th>Day</th><th>Visits</th><th>Page views</th></tr>${days
+  .map((d) => `<tr><td>${esc(dayLabel(d.date))}</td><td>${Number(d.visits) || 0}</td><td>${Number(d.pageViews) || 0}</td></tr>`)
+  .join("")}</table>`;
+ return `<span class="vbars ${size}" aria-hidden="true">${bars}</span>${size === "detail" ? table : ""}`;
 }
 
 function kindLabel(kind) {
@@ -112,6 +149,8 @@ function kindLabel(kind) {
 
  let accessEditor = null; // { id, mode, emails }
  let renameEditor = null; // { id, name }
+ let domainEditor = null; // { id, hostname }
+ let nudgedAt = 0;
 
  let busy = "";
  let error = "";
@@ -183,16 +222,28 @@ function kindLabel(kind) {
   return `<span class="badge">Draft</span>`;
  }
 
- function renderStepProgress(op) {
+ function renderStepProgress(op, ownsRecords = false) {
   const s = op.status;
   const up = op.progress && op.progress.total > 0 ? op.progress : null;
   const pct = up ? Math.max(4, Math.min(100, Math.round((up.uploaded / up.total) * 100))) : 0;
   const steps =
    op.action === "remove"
     ? [
-       { key: "removing", label: "Remove Cloudflare Pages project and clean up access" },
+       ...(ownsRecords || s === "dns" ? [{ key: "dns", label: "Delete the DNS records Sites created", match: ["queued", "dns"] }] : []),
+       { key: "removing", label: "Remove Cloudflare Pages project and clean up access", match: ownsRecords || s === "dns" ? ["removing"] : ["queued", "removing"] },
       ]
-    : op.action === "rollback"
+    : op.action === "domain-add"
+      ? [
+         { key: "creating", label: "Add the domain to the site", match: ["queued", "creating"] },
+         { key: "dns", label: "Create the DNS record", match: ["dns"] },
+        ]
+      : op.action === "domain-remove"
+        ? [{ key: "removing", label: "Remove the DNS record and the domain", match: ["queued", "removing"] }]
+        : op.action === "delete-link"
+          ? [{ key: "removing", label: "Delete the version link", match: ["queued", "removing"] }]
+          : op.action === "keep"
+            ? [{ key: "queued", label: "Turn on Keep up to date", match: ["queued"] }]
+            : op.action === "rollback"
       ? [
          { key: "rolling-back", label: "Restore target version on Cloudflare Pages" },
          { key: "verifying", label: "Check live link" },
@@ -592,6 +643,164 @@ function kindLabel(kind) {
   </div>`;
  }
 
+ // D4: Keep up to date sits above the versions it publishes.
+ function renderKeepRow(p, canMutate) {
+  const on = p.keepUpdated;
+  const canTurnOff = !p.otherAccount && !busy;
+  return `<div class="panel-section">
+   <div class="row spread">
+    <div>
+     <h2>Keep up to date</h2>
+     <p class="muted small">${on ? "Each new version of the artifact is published here without asking." : "New versions wait for you to publish them."}</p>
+    </div>
+    <div class="row" data-align-row data-align-wrap>
+     ${on && p.syncFailedVersion ? `<button type="button" data-action="keep-retry" data-id="${esc(p.id)}" ${!canMutate ? "disabled" : ""}>${busy === "keep-retry" ? "Trying…" : "Try again"}</button>` : ""}
+     ${
+      on
+       ? `<button type="button" data-action="keep-off" data-id="${esc(p.id)}" ${!canTurnOff ? "disabled" : ""}>Turn off</button>`
+       : `<button type="button" data-action="keep-on" data-id="${esc(p.id)}" ${!canMutate ? "disabled" : ""}>${busy === "keep-on" ? "Preparing…" : "Turn on…"}</button>`
+     }
+    </div>
+   </div>
+   ${p.syncNote ? `<p class="note-line${on ? " warn" : ""}" role="status">${esc(p.syncNote)}</p>` : ""}
+  </div>`;
+ }
+
+ // D5: seven days of Visits and Page views, or what the token is missing.
+ function renderVisits(p) {
+  const v = p.visits;
+  const sum = state?.visits || {};
+  if (sum.status === "permission" || sum.status === "unavailable") {
+   return `<div class="visits-note" role="status">
+    <span class="muted small">${esc(sum.message)}${sum.status === "permission" ? " Add it to the token in Cloudflare, or create a new token and paste it in Settings." : ""}</span>
+    ${
+     sum.status === "permission"
+      ? `<div class="row" data-align-row data-align-wrap>
+          <button type="button" data-sync="create-token">Create a token</button>
+          <button type="button" data-sync="settings">Open settings</button>
+         </div>`
+      : ""
+    }
+   </div>`;
+  }
+  if (!v || !v.fetchedAt) {
+   return `<p class="muted small visits-wait">${sum.status === "error" ? esc(sum.message) : "Counting visits… the first numbers appear within a few minutes."}</p>`;
+  }
+  const none = v.visits === 0 && v.pageViews === 0;
+  return `<div class="visits">
+   <div class="visits-figures">
+    <span class="visits-num">${numberFmt.format(v.visits)}</span><span class="muted small">visit${v.visits === 1 ? "" : "s"}</span>
+    <span class="visits-num secondary">${numberFmt.format(v.pageViews)}</span><span class="muted small">page view${v.pageViews === 1 ? "" : "s"} · last 7 days</span>
+   </div>
+   ${visitsBars(v.days, "detail")}
+   ${none ? `<p class="muted small">No visits in the last 7 days. Cloudflare counts from the first publication after Web Analytics was turned on.</p>` : ""}
+   <div class="row spread visits-foot">
+    <span class="muted small">${esc(dayLabel(v.days[0]?.date))} – ${esc(dayLabel(v.days.at(-1)?.date))} · updated ${esc(formatAgo(v.fetchedAt))}${sum.status === "error" ? " · " + esc(sum.message) : ""}</span>
+    <button type="button" class="ghost" data-action="visits-refresh" ${busy ? "disabled" : ""}>${busy === "visits-refresh" ? "Refreshing…" : "Refresh"}</button>
+   </div>
+  </div>`;
+ }
+
+ function visitsCell(p) {
+  if (p.status === "removed" || p.otherAccount) return `<span class="muted small">—</span>`;
+  if (!p.analytics) return `<span class="muted small">Visits off</span>`;
+  const sum = state?.visits;
+  if (sum?.status === "permission") return `<span class="muted small" title="${esc(sum.message)}">Visits need permission</span>`;
+  const v = p.visits;
+  if (!v?.fetchedAt) return `<span class="muted small">—</span>`;
+  const tip = `${numberFmt.format(v.visits)} visits, ${numberFmt.format(v.pageViews)} page views in the last 7 days`;
+  return `<span class="visits-cell" title="${esc(tip)}">${visitsBars(v.days)}<span class="visits-cell-num">${numberFmt.format(v.visits)}</span><span class="muted small stack-only">visits · 7 days</span><span class="sr-only">${esc(tip)}</span></span>`;
+ }
+
+ // D6: custom subdomains, each with its state and, while waiting, the exact
+ // record to add. Every cell of a record copies on click.
+ function renderDomains(p, canMutate) {
+  const list = p.domains || [];
+  const restricted = p.access_mode === "restricted";
+  const editing = domainEditor?.id === p.id;
+  const badge = (d) =>
+   d.state === "active"
+    ? `<span class="badge ok"><span class="badge-dot"></span>Active</span>`
+    : d.state === "adding"
+      ? `<span class="badge accent"><span class="badge-dot"></span>Adding…</span>`
+      : d.state === "attention"
+        ? `<span class="badge danger"><span class="badge-dot"></span>Needs attention</span>`
+        : `<span class="badge warn"><span class="badge-dot"></span>Waiting for DNS</span>`;
+  const cell = (value, key, label) =>
+   `<button type="button" class="record-cell mono" data-sync="copy" data-url="${esc(value)}" data-key="${esc(key)}" aria-label="Copy ${esc(label)} ${esc(value)}">${copiedKey === key ? "Copied" : esc(value)}</button>`;
+  const record = (r, key) => `<div class="record-row">
+    <span class="record-type mono">${esc(r.type)}</span>
+    ${cell(r.name, key + "-n", "name")}
+    ${cell(r.content, key + "-c", "target")}
+   </div>`;
+  const explain = (d) => {
+   if (d.state === "active") return `Opens this site at ${esc(d.hostname)}.${d.ownedRecord ? ` Sites created its CNAME record in ${esc(d.zone || "your zone")}.` : ""}`;
+   if (d.state === "adding") return "Adding the domain…";
+   if (d.status === "missing") return "Cloudflare no longer lists this domain on the site. Remove it here, then add it again if you still want it.";
+   if (d.state === "attention") return "Cloudflare could not verify this domain. Check that the record below is in place, and that no CAA record blocks Let's Encrypt or Google Trust Services, then Check now.";
+   if (d.dns === "auto") return `Sites created the CNAME record in ${esc(d.zone || "your zone")}. Cloudflare is checking it and issuing a certificate; this usually takes a few minutes.`;
+   if (d.dns === "existing") return `The CNAME record is already in ${esc(d.zone || "your zone")}. Cloudflare is checking it and issuing a certificate.`;
+   if (d.dns === "conflict") return `${esc(d.hostname)} already has another DNS record. Replace it with this CNAME, then Check now.`;
+   return `Add this record at the DNS provider of ${esc(d.hostname)}, then Check now. It is safe to add now: the domain is already on the site.`;
+  };
+  const rows = list
+   .map((d, i) => {
+    const showRecord = d.state !== "active" && d.state !== "adding" && (d.dns === "manual" || d.dns === "conflict" || d.state === "attention");
+    return `<div class="domain-row">
+     <div class="row spread">
+      <div class="row">
+       <strong class="mono">${esc(d.hostname)}</strong>
+       ${badge(d)}
+      </div>
+      <div class="row" data-align-row data-align-wrap>
+       ${d.url ? `<button type="button" data-sync="open-url" data-url="${esc(d.url)}">Open</button>` : ""}
+       ${d.state !== "active" && d.state !== "adding" ? `<button type="button" data-action="domain-check" data-id="${esc(p.id)}" data-host="${esc(d.hostname)}" ${busy || p.otherAccount ? "disabled" : ""}>${busy === "domain-check" ? "Checking…" : "Check now"}</button>` : ""}
+       ${d.state !== "adding" ? `<button type="button" class="ghost danger-text" data-action="domain-remove" data-id="${esc(p.id)}" data-host="${esc(d.hostname)}" ${!canMutate ? "disabled" : ""}>Remove…</button>` : ""}
+      </div>
+     </div>
+     <p class="muted small">${explain(d)}</p>
+     ${showRecord ? `<div class="record-table">${record(d.record, `rec-${i}`)}${d.txt ? record(d.txt, `txt-${i}`) : ""}</div>` : ""}
+     ${d.checkedAt && d.state !== "active" ? `<p class="muted small">Checked ${esc(formatAgo(d.checkedAt))}; Sites checks again every minute.</p>` : ""}
+    </div>`;
+   })
+   .join("");
+  return `<div class="panel-section">
+   <div class="row spread">
+    <div>
+     <h2>Custom domains</h2>
+     <p class="muted small">${
+      restricted
+       ? "Custom domains work on sites anyone with the link can open; this restricted site keeps its .pages.dev address."
+       : list.length
+         ? `Also opens at ${esc(p.project)}.pages.dev.`
+         : `Open the site at your own subdomain, such as docs.example.com. It always opens at ${esc(p.project)}.pages.dev too.`
+     }</p>
+    </div>
+    ${
+     !restricted && !editing
+      ? `<div class="row" data-align-row data-align-wrap><button type="button" data-action="domain-edit" data-id="${esc(p.id)}" ${!canMutate ? "disabled" : ""}>Add domain…</button></div>`
+      : ""
+    }
+   </div>
+   ${rows ? `<div class="domain-list">${rows}</div>` : ""}
+   ${
+    editing && !restricted
+     ? `<form id="domain-form" data-site="${esc(p.id)}" noValidate style="margin-top:14px" class="field-stack">
+         <label class="field">
+          <span class="field-label">Subdomain</span>
+          <input id="domain-name" type="text" inputmode="url" placeholder="docs.example.com" value="${esc(domainEditor.hostname)}" autocomplete="off" spellcheck="false">
+         </label>
+         <p class="muted small">When the domain's zone is in this Cloudflare account and the token may edit its DNS, Sites creates the CNAME record. Otherwise it shows the exact record to add.</p>
+         <div class="row" data-align-row data-align-wrap>
+          <button type="submit" class="primary" ${busy ? "disabled" : ""}>${busy === "domain-add" ? "Preparing…" : "Add domain"}</button>
+          <button type="button" data-action="domain-cancel" ${busy ? "disabled" : ""}>Cancel</button>
+         </div>
+        </form>`
+     : ""
+   }
+  </div>`;
+ }
+
  function renderDetailView() {
   const p = (state?.publications || []).find((item) => item.id === selectedSiteId);
   if (!p) {
@@ -678,7 +887,7 @@ function kindLabel(kind) {
             </div>
            </div>`
         : activeOp
-          ? `<div class="panel-section">${renderStepProgress(activeOp)}</div>`
+          ? `<div class="panel-section">${renderStepProgress(activeOp, (p.domains || []).some((d) => d.ownedRecord))}</div>`
           : lastOp?.status === "failed" && lastOp.error
             ? `<div class="panel-section row spread" role="alert">
                 <div class="banner-copy">
@@ -698,10 +907,11 @@ function kindLabel(kind) {
    </section>
 
    <section class="panel" aria-label="Versions">
+    ${p.hasProject && p.status !== "removed" ? renderKeepRow(p, canMutate) : ""}
     <div class="panel-section">
      <div class="row spread" style="margin-bottom:8px">
       <h2>Versions</h2>
-      <span class="muted small">Preview links last 30 days (up to 100)</span>
+      <span class="muted small">Each version keeps its own link · Cloudflare keeps them 30 days (the latest 100)</span>
      </div>
      ${
       p.history && p.history.length > 0
@@ -710,17 +920,24 @@ function kindLabel(kind) {
             .map((d) => {
              const isCurrent = d.id === p.deployment && p.status !== "removed";
              const canRestoreRow = !isCurrent && restoreOffered(p, d.version, state?.accessSetup?.status === "ready") && canMutate && (d.project === p.project || d.pruned);
+             const linkAlive = !d.pruned && !d.linkDeleted && d.project === p.project && p.status !== "removed";
+             const canDeleteLink = linkAlive && !isCurrent && canMutate;
+             const host = d.url ? d.url.replace(/^https?:\/\//, "").replace(/\/$/, "") : "";
+             const gone = d.linkDeleted ? "Link deleted; restores from COGNIX[WS]" : d.pruned ? "Preview pruned on Cloudflare; restores from COGNIX[WS]" : "";
              return `<div class="version-row">
               <div class="version-info">
                <div class="row">
                 <strong>Version ${d.version}</strong>
                 ${isCurrent ? `<span class="badge ok">Live</span>` : ""}
-                ${!isCurrent && d.pruned ? `<span class="badge">Local copy ready</span>` : ""}
+                ${!isCurrent && (d.pruned || d.linkDeleted) ? `<span class="badge">Local copy ready</span>` : ""}
                </div>
-               <span class="muted small">${esc(formatWhen(d.created_at))}${d.pruned && !isCurrent ? " · Preview pruned on Cloudflare; restores from COGNIX[WS]" : ""}</span>
+               <span class="muted small">${esc(formatWhen(d.created_at))}${!isCurrent && gone ? ` · ${esc(gone)}` : ""}</span>
+               ${linkAlive && host ? `<span class="muted small mono version-link">${esc(host)}</span>` : ""}
               </div>
               <div class="row" data-align-row data-align-wrap>
+               ${linkAlive && d.url ? `<button type="button" data-sync="copy" data-url="${esc(d.url)}" data-key="v-${esc(d.id)}">${copiedKey === "v-" + d.id ? "Copied" : "Copy link"}</button>` : ""}
                ${canRestoreRow ? `<button type="button" data-action="restore" data-id="${esc(p.id)}/${esc(d.id)}">Restore</button>` : ""}
+               ${canDeleteLink ? `<button type="button" class="ghost" data-action="delete-link" data-id="${esc(p.id)}/${esc(d.id)}">Delete link…</button>` : ""}
               </div>
              </div>`;
             })
@@ -777,7 +994,10 @@ function kindLabel(kind) {
             <button type="button" data-action="analytics-toggle" data-id="${esc(p.id)}" ${!canMutate ? "disabled" : ""}>${p.analytics ? "Turn off" : "Turn on"}</button>
            </div>
           </div>
+          ${p.analytics ? renderVisits(p) : ""}
          </div>
+
+         ${renderDomains(p, canMutate)}
 
          <div class="panel-section">
           <div class="row spread">
@@ -928,6 +1148,7 @@ function kindLabel(kind) {
           <span>Site</span>
           <span>Status</span>
           <span>Access</span>
+          <span>Visits · 7 days</span>
           <span>Actions</span>
          </div>
          <div class="sites-list">
@@ -940,12 +1161,22 @@ function kindLabel(kind) {
                <span class="site-link-title">${esc(p.title)}</span>
                ${p.artifactKind === "design" ? `<span class="badge">Design</span>` : ""}
               </button>
-              <span class="site-sub mono">${esc(p.url ? p.url.replace(/^https?:\/\//, "") : p.project + ".pages.dev")}</span>
+              <span class="site-sub mono">${esc(p.url ? p.url.replace(/^https?:\/\//, "").replace(/\/$/, "") : p.project + ".pages.dev")}${(() => {
+               const live = (p.domains || []).filter((d) => d.state === "active");
+               return p.status !== "removed" && live.length ? ` · ${esc(live[0].hostname)}${live.length > 1 ? ` +${live.length - 1}` : ""}` : "";
+              })()}</span>
              </div>
-             <div>${siteBadge(p)}</div>
+             <div class="site-status">${siteBadge(p)}${
+              p.keepUpdated && p.status !== "removed"
+               ? p.syncNote
+                 ? `<span class="small note-line warn tight" title="${esc(p.syncNote)}">Keep up to date is waiting</span>`
+                 : `<span class="muted small">Keeps up to date</span>`
+               : ""
+             }</div>
              <div class="small muted">${
               p.access_mode === "restricted" ? `Restricted (${p.access_emails.length})` : "Public"
              }</div>
+             <div>${visitsCell(p)}</div>
              <div class="site-actions" data-align-row data-align-wrap>
               ${(() => {
                // The row offers the site's primary change only (ui/actions.mjs): Update vN or Undo to vN.
@@ -1162,7 +1393,9 @@ function kindLabel(kind) {
    note =
     op.action === "analytics"
      ? "Web Analytics is already in that state."
-     : "That version and access configuration are already live.";
+     : op.action === "keep"
+       ? "Keep up to date is already on."
+       : "That version and access configuration are already live.";
    return null;
   }
   const res = await confirmDoor.operation(op.id);
@@ -1208,6 +1441,7 @@ function kindLabel(kind) {
    selectedSiteId = id;
    accessEditor = null;
    renameEditor = null;
+   domainEditor = null;
    view = "detail";
    error = "";
    note = "";
@@ -1280,6 +1514,17 @@ function kindLabel(kind) {
    render();
    return;
   }
+  if (name === "domain-edit") {
+   domainEditor = { id, hostname: "" };
+   render();
+   document.getElementById("domain-name")?.focus();
+   return;
+  }
+  if (name === "domain-cancel") {
+   domainEditor = null;
+   render();
+   return;
+  }
 
   if (busy) return;
   busy = name;
@@ -1344,6 +1589,32 @@ function kindLabel(kind) {
     if (op) renameEditor = null;
    } else if (name === "remove") {
     await prepareAndConfirm({ action: "remove", publicationId: id });
+   } else if (name === "keep-on") {
+    await prepareAndConfirm({ action: "keep", publicationId: id });
+   } else if (name === "keep-off") {
+    await request("/keep", { publicationId: id, on: false });
+    await refreshState();
+    note = "Keep up to date is off. New versions wait for you.";
+   } else if (name === "keep-retry") {
+    await request("/keep/retry", { publicationId: id });
+    await refreshState();
+   } else if (name === "domain-add" && domainEditor) {
+    const hostname = domainEditor.hostname.trim().toLowerCase();
+    if (!hostname) throw new Error("Enter a subdomain such as docs.example.com.");
+    const op = await prepareAndConfirm({ action: "domain-add", publicationId: domainEditor.id, hostname });
+    if (op) domainEditor = null;
+   } else if (name === "domain-remove") {
+    await prepareAndConfirm({ action: "domain-remove", publicationId: id, hostname: el?.dataset?.host || "" });
+   } else if (name === "domain-check") {
+    const d = await request("/domains/check", { publicationId: id, hostname: el?.dataset?.host || "" });
+    await refreshState();
+    note = d.state === "active" ? `${d.hostname} is active.` : `${d.hostname} is not active yet; Sites checks again every minute.`;
+   } else if (name === "delete-link") {
+    const [publicationId, deployment] = id.split("/");
+    await prepareAndConfirm({ action: "delete-link", publicationId, deployment });
+   } else if (name === "visits-refresh") {
+    await request("/visits/refresh", {});
+    await refreshState();
    } else if (name === "restore") {
     const [publicationId, deployment] = id.split("/");
     await prepareAndConfirm({ action: "rollback", publicationId, deployment });
@@ -1381,6 +1652,8 @@ function kindLabel(kind) {
    accessEditor.emails = t.value;
   } else if (t.id === "rename-name" && renameEditor) {
    renameEditor.name = t.value;
+  } else if (t.id === "domain-name" && domainEditor) {
+   domainEditor.hostname = t.value;
   } else if (t.id === "site-search") {
    search = t.value;
    render();
@@ -1409,6 +1682,7 @@ function kindLabel(kind) {
   }
   else if (e.target.id === "access-form") void dispatchAction("access-save");
   else if (e.target.id === "rename-form") void dispatchAction("rename-save");
+  else if (e.target.id === "domain-form") void dispatchAction("domain-add");
  });
 
  root.addEventListener("click", (e) => {
@@ -1458,6 +1732,7 @@ function kindLabel(kind) {
 
  if (events) {
   events.onChange(() => {
+   nudge();
    clearTimeout(refreshTimer);
    refreshTimer = setTimeout(async () => {
     await refreshState();
@@ -1470,6 +1745,15 @@ function kindLabel(kind) {
     }
    }, 120);
   });
+ }
+
+ // An artifact changed (or Sites opened): Keep up to date, domains waiting for
+ // DNS and stale visits are checked now rather than within the minute. The
+ // process throttles this too.
+ function nudge() {
+  if (Date.now() - nudgedAt < 15_000) return;
+  nudgedAt = Date.now();
+  request("/sync/check", {}).catch(() => {});
  }
 
  const initialCtx = context?.current?.() || null;
@@ -1488,6 +1772,7 @@ function kindLabel(kind) {
  }
 
  await refreshState();
+ nudge();
  if (view === "review" && reviewArtifactId) {
   await openReview(reviewArtifactId, reviewVersion, true);
  }
