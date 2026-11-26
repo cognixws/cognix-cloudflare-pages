@@ -7,10 +7,10 @@ test("the installable UI matches the standalone build", async () => {
  assert.equal(await buildUI(), readFileSync(new URL("../ui/app.js", import.meta.url), "utf8"));
 });
 
-test("the package exposes the v0.5.1 COGNIX[WS] installation contract", () => {
+test("the package exposes the v0.6.0 COGNIX[WS] installation contract", () => {
  const m = JSON.parse(readFileSync(new URL("../picode-extension.json", import.meta.url), "utf8"));
  assert.equal(m.id, "cloudflare-pages");
- assert.equal(m.version, "0.5.1");
+ assert.equal(m.version, "0.6.0");
  assert.equal(m.apiVersion, 26);
  assert.equal(m.outsideEffects, true);
  assert.deepEqual(m.activation, { instance: true });
@@ -40,7 +40,10 @@ test("the package exposes the v0.5.1 COGNIX[WS] installation contract", () => {
   "migrations/004_domains.sql",
   "migrations/005_analytics.sql",
   "migrations/006_v2_f1.sql",
+  "migrations/007_v2_f2.sql",
   "analytics.mjs",
+  "domains.mjs",
+  "visits.mjs",
  ]) {
   assert.ok(existsSync(new URL("../" + p, import.meta.url)), p);
  }

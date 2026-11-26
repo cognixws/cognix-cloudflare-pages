@@ -11,6 +11,14 @@ export async function startFakeCloudflare(options = {}) {
     denyRum: false,
     uploadDelayMs: 0,
     failDeployStatus: 0,
+    // 0.6.0: zones, DNS, custom domains and GraphQL visits.
+    denyZones: false,
+    denyDnsWrite: false,
+    denyAnalyticsQuery: false,
+    analyticsPathDenied: false,
+    zones: new Map(), // zoneId -> { id, name, account, records: Map }
+    rumEvents: [], // { siteTag, date, visits, pageViews }
+    graphqlQueries: [],
     authDomain: options.authDomain || "cognix-test.cloudflareaccess.com",
     otpEnabled: options.otpEnabled !== false,
     accounts: new Map(), // accountId -> { projects: Map, rumSites: Map, accessApps: Map }
@@ -128,6 +136,24 @@ export async function startFakeCloudflare(options = {}) {
         if (typeof body.denyRum === "boolean") state.denyRum = body.denyRum;
         if (typeof body.uploadDelayMs === "number") state.uploadDelayMs = body.uploadDelayMs;
         if (typeof body.failDeployStatus === "number") state.failDeployStatus = body.failDeployStatus;
+        if (typeof body.denyZones === "boolean") state.denyZones = body.denyZones;
+        if (typeof body.denyDnsWrite === "boolean") state.denyDnsWrite = body.denyDnsWrite;
+        if (typeof body.denyAnalyticsQuery === "boolean") state.denyAnalyticsQuery = body.denyAnalyticsQuery;
+        if (body.addZone) {
+          const id = "zone_" + body.addZone.name.replace(/\W/g, "_");
+          state.zones.set(id, { id, name: body.addZone.name, account: body.addZone.accountId, records: new Map() });
+        }
+        if (body.addRecord) {
+          const z = [...state.zones.values()].find((x) => x.name === body.addRecord.zone);
+          const id = "rec_" + (z.records.size + 1) + "_" + Math.random().toString(16).slice(2, 8);
+          z.records.set(id, { id, ...body.addRecord.record });
+        }
+        if (body.rumEvents) state.rumEvents.push(...body.rumEvents);
+        if (body.domainStatus) {
+          const { accountId, project, name, status } = body.domainStatus;
+          const d = acct(accountId).projects.get(project)?.customDomains?.get(name);
+          if (d) d.forced = status;
+        }
         if (body.pruneDeployment) {
           const { accountId, project, deploymentId } = body.pruneDeployment;
           const p = acct(accountId).projects.get(project);
@@ -173,6 +199,67 @@ export async function startFakeCloudflare(options = {}) {
       // Standard API token verification.
       if (!token || state.expiredTokens.has(token)) {
         return err(res, 401, "Invalid API Token");
+      }
+
+      // GraphQL Analytics (D5): 200 with an errors array, like Cloudflare's.
+      if (u.pathname === "/client/v4/graphql" && method === "POST") {
+        const body = await readJSON(req);
+        const query = String(body.query || "");
+        state.graphqlQueries.push(query);
+        if (!state.validTokens.has(token) || state.denyAnalyticsQuery) {
+          return send(res, 200, { data: null, errors: [{ message: "not authorized for that account", path: ["viewer", "accounts"] }] });
+        }
+        if (state.analyticsPathDenied) {
+          return send(res, 200, { data: null, errors: [{ message: "does not have access to the path", path: ["viewer"] }] });
+        }
+        const tags = [...(/siteTag_in:\s*\[([^\]]*)\]/.exec(query)?.[1] || "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+        const since = /date_geq:\s*"([^"]+)"/.exec(query)?.[1] || "";
+        const until = /date_leq:\s*"([^"]+)"/.exec(query)?.[1] || "";
+        const rows = state.rumEvents.filter((e) => (!tags.length || tags.includes(e.siteTag)) && e.date >= since && e.date <= until);
+        const groups = rows.map((e) => ({ count: e.pageViews, sum: { visits: e.visits }, dimensions: { date: e.date, siteTag: e.siteTag } }));
+        return send(res, 200, { data: { viewer: { accounts: [{ rumPageloadEventsAdaptiveGroups: groups }] } }, errors: null });
+      }
+
+      // Zones and DNS records (D6).
+      if (u.pathname === "/client/v4/zones" && method === "GET") {
+        if (!state.validTokens.has(token)) return err(res, 403, "Token lacks permission");
+        if (state.denyZones) return err(res, 403, "Zone read denied");
+        const name = u.searchParams.get("name");
+        const account = u.searchParams.get("account.id");
+        return ok(res, [...state.zones.values()].filter((z) => z.name === name && (!account || z.account === account)).map((z) => ({ id: z.id, name: z.name, account: { id: z.account } })));
+      }
+      const dnsMatch = /^\/client\/v4\/zones\/([^/]+)\/dns_records(?:\/([^/]+))?$/.exec(u.pathname);
+      if (dnsMatch) {
+        if (!state.validTokens.has(token)) return err(res, 403, "Token lacks permission");
+        const zone = state.zones.get(decodeURIComponent(dnsMatch[1]));
+        if (!zone) return err(res, 404, "Zone not found");
+        const recId = dnsMatch[2] ? decodeURIComponent(dnsMatch[2]) : "";
+        if (!recId && method === "GET") {
+          if (state.denyZones) return err(res, 403, "DNS read denied");
+          const name = (u.searchParams.get("name.exact") || "").toLowerCase();
+          return ok(res, [...zone.records.values()].filter((r) => !name || r.name.toLowerCase() === name));
+        }
+        if (!recId && method === "POST") {
+          if (state.denyDnsWrite) return err(res, 403, "DNS write denied");
+          const body = await readJSON(req);
+          if ([...zone.records.values()].some((r) => r.name.toLowerCase() === String(body.name).toLowerCase())) return err(res, 400, "A record with that host already exists");
+          const id = "rec_" + (zone.records.size + 1) + "_" + Math.random().toString(16).slice(2, 8);
+          const rec = { id, type: body.type, name: body.name, content: body.content, proxied: !!body.proxied, ttl: body.ttl, comment: body.comment || "" };
+          zone.records.set(id, rec);
+          return ok(res, rec);
+        }
+        const rec = zone.records.get(recId);
+        if (!rec) return err(res, 404, "Record not found");
+        if (method === "GET") return ok(res, rec);
+        if (method === "DELETE") {
+          if (state.denyDnsWrite) return err(res, 403, "DNS write denied");
+          zone.records.delete(recId);
+          return ok(res, { id: recId });
+        }
+        if (method === "PATCH") {
+          Object.assign(rec, await readJSON(req), { id: recId });
+          return ok(res, rec);
+        }
       }
 
       // Access endpoints.
@@ -280,6 +367,49 @@ export async function startFakeCloudflare(options = {}) {
         const projectName = decodeURIComponent(rawProject);
         const p = a.projects.get(projectName);
         if (!p) return err(res, 404, "Project not found");
+        p.customDomains ||= new Map();
+
+        // Custom domains: pending until a CNAME in a fake zone points at the
+        // project (or a test forces a status); a name lives on one project.
+        const domMatch = /^domains(?:\/([^/]+))?$/.exec(sub || "");
+        if (domMatch) {
+          const name = domMatch[1] ? decodeURIComponent(domMatch[1]).toLowerCase() : "";
+          const view = (d) => {
+            const pointed = [...state.zones.values()].some((z) => [...z.records.values()].some((r) => r.type === "CNAME" && r.name.toLowerCase() === d.name && String(r.content).toLowerCase() === p.name + ".pages.dev"));
+            const status = d.forced || (pointed ? "active" : "pending");
+            return {
+              id: d.id,
+              name: d.name,
+              status,
+              created_on: d.created_on,
+              zone_tag: d.zone_tag || null,
+              validation_data: { method: d.method || "http", status: status === "active" ? "active" : status === "error" ? "error" : "pending", ...(d.method === "txt" ? { txt_name: "_cf-custom-hostname." + d.name, txt_value: "fake-txt-value-123" } : {}) },
+              verification_data: { status: status === "active" ? "active" : "pending" },
+            };
+          };
+          if (!name && method === "GET") return ok(res, [...p.customDomains.values()].map(view));
+          if (!name && method === "POST") {
+            const body = await readJSON(req);
+            const host = String(body.name || "").toLowerCase();
+            for (const acc of state.accounts.values()) for (const other of acc.projects.values()) if (other.customDomains?.has(host)) return err(res, 409, "Domain already in use");
+            const d = { id: "dom_" + (++a.seq), name: host, created_on: new Date().toISOString(), method: body.__method };
+            p.customDomains.set(host, d);
+            p.domains = [...p.domains, host];
+            return ok(res, view(d));
+          }
+          const d = p.customDomains.get(name);
+          if (!d) return err(res, 404, "Domain not found");
+          if (method === "GET") return ok(res, view(d));
+          if (method === "PATCH") {
+            if (d.forced === "error") delete d.forced;
+            return ok(res, view(d));
+          }
+          if (method === "DELETE") {
+            p.customDomains.delete(name);
+            p.domains = p.domains.filter((x) => x !== name);
+            return ok(res, null);
+          }
+        }
 
         if (!sub && method === "GET") return ok(res, projectView(p));
         if (!sub && method === "PATCH") {

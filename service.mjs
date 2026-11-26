@@ -3,8 +3,15 @@ import { RemoteError } from "./cloudflare.mjs";
 import { PublicationAccess, accessConfig, accessHash } from "./access.mjs";
 import { PublicationAnalytics, analyticsURL } from "./analytics.mjs";
 import { scanBundleForSecrets, tokenTemplateURL, maskAccountId, shortSlug, DASHBOARD_PERMISSION_LABELS } from "./scan.mjs";
+import { PublicationDomains, normalizeHostname } from "./domains.mjs";
+import { PublicationVisits } from "./visits.mjs";
 
-const active = ["prepared", "queued", "creating", "protecting", "analytics", "uploading", "deploying", "verifying", "removing", "rolling-back", "unknown"];
+const active = ["prepared", "queued", "creating", "protecting", "analytics", "dns", "uploading", "deploying", "verifying", "removing", "rolling-back", "unknown"];
+const ACTIONS = ["publish", "remove", "rollback", "access", "analytics", "rename", "domain-add", "domain-remove", "delete-link", "keep"];
+// The background round (Keep up to date, domain checks, visits) runs at most
+// once a minute; the page may nudge it sooner, at most every 15 seconds.
+const BACKGROUND_MS = 60_000;
+const NUDGE_MS = 15_000;
 const PUBLISHABLE_KINDS = new Set(["page", "design"]);
 const now = () => new Date().toISOString();
 const digest = (x) => createHash("sha256").update(JSON.stringify(x)).digest("hex");
@@ -47,6 +54,11 @@ export class PagesService {
   this.scanCache = new Map();
   this.access = new PublicationAccess({ db, remote, configuration: () => this.configuration() });
   this.analytics = new PublicationAnalytics({ db });
+  this.domains = new PublicationDomains({ db });
+  this.visits = new PublicationVisits({ db });
+  this.syncing = false;
+  this.backgroundAt = 0;
+  this.backgroundRunning = false;
   db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
  }
 
@@ -118,10 +130,14 @@ export class PagesService {
   }
   if (accessToken) this.accessSetupCheck = { ...(await this.checkAccessToken(account, accessToken)), fingerprint: digest(merged) };
   else this.accessSetupCheck = null;
+  // D5: whether the token can read visits. It never blocks saving the token.
+  const visits = await this.visits.probe(cf, account, digest(merged));
+  if (visits === "permission") message += " Visits need Account Analytics: Read on the token.";
   this.connectionCheck = {
    status: "ready",
    checkedAt: now(),
    analytics,
+   visits,
    message,
    fingerprint: digest(merged),
   };
@@ -193,6 +209,8 @@ export class PagesService {
     result.analytics = "unavailable";
     result.message += " Web Analytics needs Account Settings: Edit (Account Settings Read and Write) on the token.";
    }
+   result.visits = await this.visits.probe(cf, c.account, digest(c));
+   if (result.visits === "permission") result.message += " Visits need Account Analytics: Read on the token.";
   } catch (e) {
    const expired = e instanceof RemoteError && [401, 403].includes(e.status);
    result = {
@@ -303,7 +321,7 @@ export class PagesService {
   const history = this.db
    .prepare("SELECT * FROM deployments WHERE publication_id=? ORDER BY created_at DESC")
    .all(p.id)
-   .map((d) => ({ ...d, pruned: Boolean(d.pruned) }));
+   .map((d) => ({ ...d, pruned: Boolean(d.pruned), link_deleted: undefined, linkDeleted: Boolean(d.link_deleted) }));
   return {
    ...p,
    identity: undefined,
@@ -321,6 +339,14 @@ export class PagesService {
    latestVersion,
    artifactKind: art?.kind || "page",
    siteStatus: siteStatusOf(p, latestVersion, activeOp, lastOp, otherAccount),
+   keep_updated: undefined,
+   sync_note: undefined,
+   sync_failed_version: undefined,
+   keepUpdated: Boolean(p.keep_updated),
+   syncNote: p.sync_note || null,
+   syncFailedVersion: p.sync_failed_version || null,
+   domains: this.domains.list(p).map((r) => this.domains.serialize(p, r)),
+   visits: this.visits.forPublication(p),
    history,
    operations,
   };
@@ -345,6 +371,7 @@ export class PagesService {
    permissionLabels: DASHBOARD_PERMISSION_LABELS,
    connection,
    accessSetup,
+   visits: this.visits.summary(digest(c)),
    publications: pubs.map((p) => this.serializePublication(p, artifacts, c.account)),
   };
  }
@@ -482,9 +509,9 @@ export class PagesService {
   return base;
  }
 
- async prepare({ artifactId, version, action = "publish", publicationId, deployment, projectName, access, analytics, actor = "owner", actorName = "" }) {
-  if (!["publish", "remove", "rollback", "access", "analytics", "rename"].includes(action)) {
-   throw new RemoteError("Choose publish, remove, rollback, access, analytics or rename.", 400);
+ async prepare({ artifactId, version, action = "publish", publicationId, deployment, projectName, access, analytics, hostname, actor = "owner", actorName = "" }) {
+  if (!ACTIONS.includes(action)) {
+   throw new RemoteError("Choose publish, remove, rollback, access, analytics, rename, a domain change, a link deletion or Keep up to date.", 400);
   }
   if (analytics !== undefined && typeof analytics !== "boolean") {
    throw new RemoteError("Choose whether Web Analytics is on or off.", 400);
@@ -499,6 +526,9 @@ export class PagesService {
   let undoRow = null;
   // Set when this publish recreates a removed site: the confirmation says so (0.5.1).
   let removedProject = null;
+  // The artifact's latest version: a person's publish or restore of an older
+  // one turns Keep up to date off, and the confirmation says so (D4).
+  let latestVersion = 0;
   const c = await this.configuration();
 
   try {
@@ -510,6 +540,7 @@ export class PagesService {
      throw new RemoteError("Choose an artifact version.", 400);
     }
     const src = await this.source(artifactId);
+    latestVersion = Number(src?.artifact?.liveVersion) || 0;
     const verMeta = (src?.versions || []).find((v) => v.n === version);
     const kind = verMeta?.kind || src?.artifact?.kind || "page";
     if (!PUBLISHABLE_KINDS.has(kind)) {
@@ -597,6 +628,10 @@ export class PagesService {
    if (action !== "publish" && action !== "access" && access !== undefined) {
     throw new RemoteError("Change access separately from restore or removal.", 400);
    }
+   // D6: custom domains belong to sites anyone with the link can open.
+   if ((action === "publish" || action === "access") && config.mode === "restricted" && p.access_mode !== "restricted" && this.domains.list(p).length) {
+    throw new RemoteError("Remove the custom domains first: a restricted site keeps to its .pages.dev address.", 409);
+   }
 
    const cf = await this.cloud(p);
    let snapshot = null;
@@ -609,6 +644,41 @@ export class PagesService {
     throw new RemoteError("The project name is already in use. Review it in Cloudflare.", 409);
    }
    if (action !== "publish" && !p.identity) throw new RemoteError("This site has not been created yet.", 409);
+   let domainPlan = null;
+   let linkTarget = null;
+   if (["domain-add", "domain-remove", "delete-link", "keep"].includes(action)) {
+    if (p.status !== "published" || !project) throw new RemoteError("Only a published site can change this.", 409);
+    snapshot = { canonical: project.canonical_deployment?.id, identity: identity(project), domains: [...(project.domains || [])].sort() };
+   }
+   if (action === "domain-add") {
+    const host = normalizeHostname(hostname);
+    if (p.access_mode === "restricted" || p.access_app || p.access_attempt) {
+     throw new RemoteError("Custom domains work on sites anyone with the link can open. This site is restricted, so it keeps its .pages.dev address.", 409);
+    }
+    const taken = this.domains.row(p.account_id, host);
+    if (taken) throw new RemoteError(taken.publication_id === p.id ? `${host} is already on this site.` : `${host} is already on another of your sites.`, 409);
+    if ((project.domains || []).some((d) => String(d).toLowerCase() === host)) throw new RemoteError(`${host} is already on this site in Cloudflare.`, 409);
+    if (this.domains.list(p).length >= 20) throw new RemoteError("A site can have up to 20 custom domains here.", 409);
+    domainPlan = await this.domains.plan(cf, p, host);
+   }
+   if (action === "domain-remove") {
+    const host = normalizeHostname(hostname);
+    const row = this.domains.row(p.account_id, host);
+    if (!row || row.publication_id !== p.id) throw new RemoteError(`${host} is not a custom domain of this site.`, 404);
+    domainPlan = { account: p.account_id, hostname: host, target: p.project + ".pages.dev", zone: row.zone_id ? { id: row.zone_id, name: row.zone_name } : null, dns: row.dns, owned: Boolean(row.dns_owned) };
+   }
+   // D10: each version keeps its own link; the person may delete one that is not live.
+   if (action === "delete-link") {
+    linkTarget = this.db.prepare("SELECT * FROM deployments WHERE publication_id=? AND id=?").get(p.id, String(deployment || ""));
+    if (!linkTarget) throw new RemoteError("Choose a version link from this site's history.", 400);
+    if (linkTarget.project !== p.project || linkTarget.pruned || linkTarget.link_deleted) throw new RemoteError("This link no longer exists on Cloudflare.", 409);
+    if (linkTarget.id === p.deployment || project.canonical_deployment?.id === linkTarget.id) throw new RemoteError("The live version's link cannot be deleted.", 409);
+    version = linkTarget.version;
+   }
+   if (action === "keep") {
+    if (p.keep_updated) return { unchanged: true, action, publication: { id: p.id, keepUpdated: true } };
+    latestVersion = Number((await this.source(p.artifact_id))?.artifact?.liveVersion) || 0;
+   }
    if ((action === "publish" || action === "access" || action === "analytics") && p.identity && project) {
     snapshot = { canonical: project.canonical_deployment?.id, identity: identity(project), domains: [...(project.domains || [])].sort() };
    }
@@ -621,9 +691,17 @@ export class PagesService {
     const domains = (project.domains || []).filter((d) => !d.endsWith(".pages.dev"));
     if (domains.length) notes += " Custom domains: " + domains.join(", ") + ".";
     if (external.length) notes += " Includes " + external.length + " deployments created outside this extension.";
+    const managed = this.domains.list(p);
+    const owned = managed.filter((r) => r.dns_owned).map((r) => r.hostname);
+    const theirs = managed.filter((r) => !r.dns_owned).map((r) => r.hostname);
+    if (owned.length) notes += ` Deletes the CNAME record${owned.length > 1 ? "s" : ""} Sites created for ${owned.join(", ")} first.`;
+    if (theirs.length) notes += ` Then delete the CNAME record for ${theirs.join(", ")} at its DNS provider, so the name does not point to a removed site.`;
    }
 
    if (action === "rename") {
+    if (this.domains.list(p).length || (project.domains || []).some((d) => !String(d).toLowerCase().endsWith(".pages.dev"))) {
+     throw new RemoteError("Remove the custom domains first: they point at the current address.", 409);
+    }
     if (await cf.getProject(projectName)) throw new RemoteError("The new project name is already in use. Choose another name.", 409);
     const deployments = await cf.deployments(p.project);
     snapshot = { canonical: project.canonical_deployment?.id, identity: identity(project), domains: [...(project.domains || [])].sort(), newName: projectName, oldTag: p.analytics_tag || null };
@@ -634,6 +712,7 @@ export class PagesService {
    // and falls back to re-uploading the immutable local COGNIX[WS] artifact
    // version when Cloudflare pruned the deployment (>30 days / >100 deploys).
    if (action === "rollback") {
+    if (p.keep_updated) latestVersion = Number((await this.source(p.artifact_id).catch(() => null))?.artifact?.liveVersion) || 0;
     let target = null;
     if (deployment) {
      target = this.db.prepare("SELECT * FROM deployments WHERE publication_id=? AND id=?").get(p.id, deployment);
@@ -682,7 +761,7 @@ export class PagesService {
    }
 
    const accessSnapshot = await this.access.snapshot(p);
-   if (config.mode === "restricted" && action !== "remove") {
+   if (config.mode === "restricted" && !["remove", "domain-remove", "delete-link", "keep"].includes(action)) {
     const { cf: ac } = await this.access.setup(p);
     await this.access.conflicts(ac, p, project ? [p.project + ".pages.dev", "*." + p.project + ".pages.dev", ...(project.domains || [])] : [p.project + ".pages.dev", "*." + p.project + ".pages.dev"]);
    }
@@ -715,11 +794,60 @@ export class PagesService {
      ? "Anyone with the link can access this site and its previous deployment URLs (preview links last up to 30 days)."
      : "Only these email addresses may sign in: " + config.emails.join(", ") + ". Production and preview URLs require an email code (1 Zero Trust seat per active reader).";
 
-   const restoreMessage = reuploadRestore
+   // D4: a person's publish or restore of a version older than the latest
+   // turns Keep up to date off (Render's rollback rule), and says so here.
+   const keepNote =
+    p.keep_updated && !String(actor).startsWith("auto") && (action === "publish" || action === "rollback") && latestVersion && version < latestVersion
+     ? ` Keep up to date turns off, so the site stays on version ${version}.`
+     : "";
+   const restoreMessage = (reuploadRestore
     ? `Restore version ${version} on ${p.project}.pages.dev (re-uploaded from your local COGNIX[WS] artifact copy because Cloudflare pruned the older deployment).`
-    : `Restore version ${version} on ${p.project}.pages.dev.`;
+    : `Restore version ${version} on ${p.project}.pages.dev.`) + keepNote;
 
-   const confirmation = {
+   const host = p.project + ".pages.dev";
+   const custom =
+    action === "domain-add"
+     ? {
+        title: `Add ${domainPlan.hostname} to this site?`,
+        message:
+         (domainPlan.dns === "auto"
+          ? `Adds ${domainPlan.hostname} to “${p.title}” (${host}) and creates the CNAME record ${domainPlan.hostname} → ${host} in the ${domainPlan.zone.name} zone.`
+          : domainPlan.dns === "existing"
+            ? `Adds ${domainPlan.hostname} to “${p.title}” (${host}). The CNAME record ${domainPlan.hostname} → ${host} already exists in ${domainPlan.zone.name}.`
+            : `Adds ${domainPlan.hostname} to “${p.title}” (${host}). Then add this record at the DNS provider of ${domainPlan.hostname}: CNAME ${domainPlan.hostname} → ${host}.${domainPlan.reason === "zone-permission" || domainPlan.reason === "dns-permission" ? " The token cannot edit this name's DNS, so Sites shows the record instead of creating it." : ""}`) +
+         " Anyone with the link can open the site at this address too.",
+        confirmLabel: "Add domain",
+        danger: false,
+       }
+     : action === "domain-remove"
+       ? {
+          title: `Remove ${domainPlan.hostname} from this site?`,
+          message: domainPlan.owned
+           ? `${domainPlan.hostname} stops opening “${p.title}”. Sites deletes the CNAME record ${domainPlan.hostname} → ${host} it created (only if it is unchanged), then removes the domain from the site.`
+           : `${domainPlan.hostname} stops opening “${p.title}”. Then delete the CNAME record for ${domainPlan.hostname} at its DNS provider, so the name does not point to a site that no longer claims it.`,
+          confirmLabel: "Remove domain",
+          danger: true,
+         }
+       : action === "delete-link"
+         ? {
+            title: `Delete the link of version ${version}?`,
+            message: `${linkTarget.url} stops working. ${host} keeps showing version ${p.version}, and version ${version} can still be restored from COGNIX[WS].`,
+            confirmLabel: "Delete link",
+            danger: true,
+           }
+         : action === "keep"
+           ? {
+              title: `Keep “${p.title}” up to date?`,
+              message:
+               `Each new version of the artifact is published to ${host} without asking, with the site's current access (${p.access_mode === "restricted" ? "only its allowed readers" : "anyone with the link"}) and settings.` +
+               (latestVersion > (p.version || 0) ? ` Version ${latestVersion} is newer than the live version ${p.version}; it is published right after you confirm.` : "") +
+               " Restoring or publishing an older version turns this off. When an automatic publish fails, the site keeps its version and a note goes to Inbox › Updates.",
+              confirmLabel: "Keep up to date",
+              danger: false,
+             }
+           : null;
+
+   const confirmation = custom || {
     title:
      action === "access"
       ? "Change site access?"
@@ -751,7 +879,7 @@ export class PagesService {
               ? restoreMessage
               : removedProject
                 ? `${removedProject}.pages.dev was removed, so this creates a new site: “${p.title}”, version ${version}, at ${p.project}.pages.dev in Cloudflare account ${maskAccountId(p.account_id)}. ${audience}${coverage}`
-                : `Publish “${p.title}”, version ${version}, to ${p.project}.pages.dev in Cloudflare account ${maskAccountId(p.account_id)}. ${audience}${coverage}`,
+                : `Publish “${p.title}”, version ${version}, to ${p.project}.pages.dev in Cloudflare account ${maskAccountId(p.account_id)}. ${audience}${coverage}${keepNote}`,
     confirmLabel:
      action === "access"
       ? "Change access"
@@ -774,11 +902,11 @@ export class PagesService {
    if (confirmation.message.length > 2000) {
     throw new RemoteError("The reader list or project changes are too large for one confirmation. Reduce the reader list or review Cloudflare.", 409);
    }
-   const revision = digest({ id, confirmation, version, digest: bundle?.digest || null, snapshot, deployment: deployment || null, access: config, accessSnapshot });
+   const revision = digest({ id, confirmation, version, digest: bundle?.digest || null, snapshot, deployment: deployment || null, access: config, accessSnapshot, domain: domainPlan });
    confirmation.revision = revision;
    this.db
     .prepare(
-     "INSERT INTO operations(id,publication_id,action,version,digest,deployment,status,confirmation,revision,snapshot,access_config,access_snapshot,analytics,actor,actor_name,warnings,created_at,updated_at) VALUES(?,?,?,?,?,?,'prepared',?,?,?,?,?,?,?,?,?,?,?)",
+     "INSERT INTO operations(id,publication_id,action,version,digest,deployment,status,confirmation,revision,snapshot,access_config,access_snapshot,analytics,actor,actor_name,warnings,domain_plan,created_at,updated_at) VALUES(?,?,?,?,?,?,'prepared',?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .run(
      id,
@@ -796,6 +924,7 @@ export class PagesService {
      actor || "owner",
      actorName || null,
      warnings.length ? JSON.stringify(warnings) : null,
+     domainPlan ? JSON.stringify(domainPlan) : null,
      now(),
      now(),
     );
@@ -908,6 +1037,7 @@ export class PagesService {
 
  async notifyFailureFYI(id) {
   const op = this.op(id);
+  if (op?.actor === "auto" && op.action === "publish") return this.autoFailed(op);
   if (!op?.actor?.startsWith("agent:") || !["publish", "rollback"].includes(op.action)) return;
   const p = this.pub(op.publication_id);
   if (!p) return;
@@ -949,11 +1079,24 @@ export class PagesService {
   const url = publicURL("https://" + project.subdomain);
   const snap = op.snapshot ? JSON.parse(op.snapshot) : null;
   const nextUndo = op.action === "rollback" && snap?.previousVersion && snap.previousVersion !== op.version ? snap.previousVersion : null;
+  // D4: when a person or an agent sets the site to a version older than the
+  // artifact's latest, Keep up to date turns off in the same transaction, so
+  // the next round never publishes the latest over their choice.
+  let keepOff = null;
+  if (this.pub(p.id)?.keep_updated && op.actor !== "auto") {
+   let latest = 0;
+   try {
+    latest = Number((await this.source(p.artifact_id))?.artifact?.liveVersion) || 0;
+   } catch {}
+   if (latest && op.version < latest) keepOff = `Turned off when version ${op.version} replaced the latest version ${latest}. Turn it on again to follow new versions.`;
+  }
   this.db.exec("BEGIN IMMEDIATE");
   try {
    this.db
     .prepare("UPDATE publications SET status='published',version=?,digest=?,deployment=?,url=?,undo_version=? WHERE id=?")
     .run(op.version, op.digest, deployment, url, nextUndo, p.id);
+   if (keepOff) this.db.prepare("UPDATE publications SET keep_updated=0,sync_note=?,sync_failed_version=NULL WHERE id=?").run(keepOff, p.id);
+   if (op.actor === "auto") this.db.prepare("UPDATE publications SET sync_note=NULL,sync_failed_version=NULL WHERE id=?").run(p.id);
    this.db
     .prepare("INSERT OR REPLACE INTO deployments(id,publication_id,operation_id,version,digest,url,created_at,project,pruned) VALUES(?,?,?,?,?,?,?,?,0)")
     .run(deployment, p.id, op.id, op.version, op.digest, publicURL(d.url), now(), p.project);
@@ -986,12 +1129,15 @@ export class PagesService {
      }
      await this.access.remove(p, op.access_snapshot ? JSON.parse(op.access_snapshot) : null, recovery);
      await this.analytics.dispose(cf, p);
-     this.db.prepare("UPDATE publications SET status='removed',undo_version=NULL WHERE id=?").run(p.id);
-     this.db.prepare("UPDATE deployments SET pruned=1 WHERE publication_id=?").run(p.id);
+     // Idempotent: a record Sites created and that still reads as written goes.
+     await this.domains.unlinkAll(cf, p);
+     this.forgetRemoved(p);
      this.set(id, "removed");
      return;
     }
-    if (recovery && ["removing", "unknown"].includes(op.status)) {
+    // A delete that may have happened is never repeated. The DNS step before
+    // it (phase "dns") deleted only this site's own records and is safe again.
+    if (recovery && (op.status === "removing" || (op.status === "unknown" && phase !== "dns"))) {
      this.set(id, "unknown", { error: "Removal has not been confirmed. Check Cloudflare again; this extension will not repeat an uncertain delete." });
      return;
     }
@@ -1003,6 +1149,13 @@ export class PagesService {
     }
     if (op.access_snapshot && accessHash(await this.access.snapshot(p)) !== accessHash(JSON.parse(op.access_snapshot))) {
      throw new RemoteError("The Access policy changed after review.", 409);
+    }
+    // D6: the CNAME records Sites created go before the project, so no name
+    // is left pointing at a pages.dev address another account could claim.
+    if (this.domains.list(p).some((r) => r.dns_owned)) {
+     this.set(id, "dns");
+     effect = true;
+     await this.domains.unlinkAll(cf, p);
     }
     this.set(id, "removing");
     effect = true;
@@ -1023,8 +1176,77 @@ export class PagesService {
     if (p.access_app || p.access_attempt) this.set(id, "protecting");
     await this.access.remove(p, op.access_snapshot ? JSON.parse(op.access_snapshot) : null, false);
     await this.analytics.dispose(cf, p);
-    this.db.prepare("UPDATE publications SET status='removed',undo_version=NULL WHERE id=?").run(p.id);
-    this.db.prepare("UPDATE deployments SET pruned=1 WHERE publication_id=?").run(p.id);
+    this.forgetRemoved(p);
+    this.set(id, "removed");
+    return;
+   }
+
+   if (op.action === "keep") {
+    if (!project) throw new RemoteError("The project is missing.", 409);
+    this.db.prepare("UPDATE publications SET keep_updated=1,sync_note=NULL,sync_failed_version=NULL WHERE id=?").run(p.id);
+    this.set(id, "published");
+    // Follows at once: a newer version waiting is published now.
+    void this.syncRound({ only: p.id });
+    return;
+   }
+
+   if (op.action === "domain-add") {
+    if (!project) throw new RemoteError("The project is missing.", 409);
+    if (p.access_mode === "restricted" || p.access_app || p.access_attempt) throw new RemoteError("This site became restricted; custom domains work on public sites.", 409);
+    effect = true;
+    try {
+     await this.domains.add(cf, p, op, (status) => this.set(id, status));
+    } catch (e) {
+     // A refused add leaves no local row behind; a lost answer keeps it for Check result.
+     const plan = JSON.parse(op.domain_plan);
+     if (e instanceof RemoteError && e.status >= 400 && e.status < 500) {
+      this.db.prepare("DELETE FROM publication_domains WHERE account_id=? AND hostname=? AND publication_id=? AND domain_id IS NULL").run(plan.account, plan.hostname, p.id);
+     }
+     throw e;
+    }
+    this.set(id, "published");
+    return;
+   }
+
+   if (op.action === "domain-remove") {
+    const plan = JSON.parse(op.domain_plan);
+    const row = this.domains.row(plan.account, plan.hostname);
+    if (row && row.publication_id === p.id) {
+     this.set(id, "removing");
+     effect = true;
+     const { left } = await this.domains.remove(cf, p, row);
+     if (left) this.db.prepare("UPDATE operations SET warnings=? WHERE id=?").run(JSON.stringify([{ message: `The DNS record for ${plan.hostname} was changed outside Sites, so it was left in place.` }]), id);
+    }
+    this.set(id, "removed");
+    return;
+   }
+
+   if (op.action === "delete-link") {
+    if (!project) throw new RemoteError("The project is missing.", 409);
+    if (project.canonical_deployment?.id === op.deployment) {
+     this.set(id, "failed", { error: "That link now belongs to the live version, so it was not deleted." });
+     return;
+    }
+    this.set(id, "removing");
+    effect = true;
+    // A deployment id is never reused, so deleting it again after a lost
+    // answer cannot touch anything else; absence settles it.
+    try {
+     await cf.deleteDeployment(p.project, op.deployment);
+    } catch (e) {
+     if (!(e instanceof RemoteError && e.status === 404)) throw e;
+    }
+    let still = null;
+    try {
+     still = await cf.deployment(p.project, op.deployment);
+    } catch (e) {
+     if (!(e instanceof RemoteError && e.status === 404)) throw e;
+    }
+    if (still) {
+     this.set(id, "unknown", { error: "Cloudflare still lists this link. Check again." });
+     return;
+    }
+    this.db.prepare("UPDATE deployments SET pruned=1,link_deleted=1 WHERE id=? AND publication_id=?").run(op.deployment, p.id);
     this.set(id, "removed");
     return;
    }
@@ -1331,6 +1553,246 @@ export class PagesService {
   for (const op of this.db.prepare("SELECT id FROM operations WHERE status='verifying'").all()) {
    this.launch(op.id, true);
   }
+  void this.background();
+ }
+
+ forgetRemoved(p) {
+  this.db.prepare("UPDATE publications SET status='removed',undo_version=NULL,keep_updated=0,sync_note=NULL,sync_failed_version=NULL WHERE id=?").run(p.id);
+  this.db.prepare("UPDATE deployments SET pruned=1 WHERE publication_id=?").run(p.id);
+  this.domains.forget(p);
+  this.visits.forget(p);
+ }
+
+ // The background round: Keep up to date, domains waiting for DNS, visits.
+ // Once a minute from tick(); the page may nudge it (Sites open, an artifact
+ // changed) at most every 15 seconds.
+ async background({ force = false } = {}) {
+  if (this.closing || this.backgroundRunning) return;
+  const t = Date.now();
+  if (!force && t - this.backgroundAt < BACKGROUND_MS) return;
+  this.backgroundAt = t;
+  this.backgroundRunning = true;
+  try {
+   await this.syncRound();
+   await this.refreshDomains().catch(() => {});
+   await this.refreshVisits().catch(() => {});
+  } finally {
+   this.backgroundRunning = false;
+  }
+ }
+ nudge() {
+  const t = Date.now();
+  if (t - (this.nudgedAt || 0) < NUDGE_MS) return { queued: false };
+  this.nudgedAt = t;
+  void this.background({ force: true });
+  return { queued: true };
+ }
+
+ async readyConfiguration() {
+  const c = await this.configuration();
+  if (!c.account || !c.token) return null;
+  return (await this.connectionState()).status === "ready" ? c : null;
+ }
+
+ // D4 Keep up to date. This process runs on one of the person's synced
+ // computers at a time (outsideEffects: true), so two computers never both
+ // follow a site. A computer whose records are stale (Cloudflare's production
+ // deployment is not the one recorded here: another computer, the dashboard
+ // or a restore elsewhere published since) turns Keep up to date off instead
+ // of publishing over that work. One active operation per site and the
+ // deployment marker keep a single computer from publishing twice.
+ syncRound({ only = null } = {}) {
+  if (this.syncing) return this.syncing;
+  const run = (async () => {
+   await null;
+   try {
+    await this.syncAll(only);
+   } catch {}
+  })();
+  this.syncing = run;
+  run.finally(() => {
+   if (this.syncing === run) this.syncing = null;
+  });
+  return run;
+ }
+
+ async syncAll(only) {
+  if (this.closing) return;
+  // A refused or unchecked token pauses every automatic publish; the
+  // connection banner says what to do, and the next round resumes. A site
+  // with a version waiting says why, once.
+  const c = await this.readyConfiguration();
+  if (!c) {
+   const cur = await this.configuration();
+   if (cur.account && cur.token && (await this.connectionState()).expired) await this.syncHoldAll(cur.account, (v) => `Version ${v} waits: Cloudflare refused the API token. Paste a new token in Settings to resume.`);
+   return;
+  }
+  const rows = this.db
+   .prepare(`SELECT id FROM publications WHERE keep_updated=1 AND status='published' AND account_id=?${only ? " AND id=?" : ""}`)
+   .all(...(only ? [c.account, only] : [c.account]));
+  if (!rows.length) return;
+  const artifacts = (await this.host("/artifacts")).artifacts || [];
+  for (const r of rows) {
+   if (this.closing) return;
+   try {
+    await this.syncSite(this.pub(r.id), artifacts, c);
+   } catch {}
+  }
+ }
+
+ async syncHoldAll(account, note) {
+  const rows = this.db.prepare("SELECT id FROM publications WHERE keep_updated=1 AND status='published' AND account_id=?").all(account);
+  if (!rows.length) return;
+  const artifacts = (await this.host("/artifacts")).artifacts || [];
+  for (const r of rows) {
+   const p = this.pub(r.id);
+   const latest = Number(artifacts.find((a) => a.id === p.artifact_id)?.liveVersion) || 0;
+   if (latest && p.version && latest > p.version) await this.syncHold(p, note(latest));
+  }
+ }
+
+ async syncSite(p, artifacts, c) {
+  if (!p?.keep_updated || p.status !== "published" || p.account_id !== c.account) return;
+  const art = artifacts.find((a) => a.id === p.artifact_id);
+  const latest = Number(art?.liveVersion) || 0;
+  if (!latest || !p.version || latest <= p.version) return;
+  if (p.sync_failed_version === latest) return;
+  if (this.db.prepare(`SELECT id FROM operations WHERE publication_id=? AND status IN (${active.map(() => "?").join(",")})`).get(p.id, ...active)) return;
+  if (p.access_mode === "restricted") {
+   const setup = (await this.accessSetupState()).status;
+   // Not checked yet (just after a restart): wait quietly for the check.
+   if (setup === "unchecked") return;
+   if (setup !== "ready") return this.syncHold(p, `Version ${latest} waits: restricted access needs setup in Settings before it can be published automatically.`);
+  }
+  const cf = this.remote(c.account, c.token);
+  let project;
+  try {
+   project = await this.checkProject(cf, p);
+  } catch (e) {
+   if (e instanceof RemoteError && e.status === 409) return this.syncStop(p, "Keep up to date turned off: the site's Cloudflare project changed identity. Review it in Cloudflare.");
+   throw e;
+  }
+  if (!project) return this.syncStop(p, "Keep up to date turned off: the site's project is missing on Cloudflare.");
+  if (project.canonical_deployment?.id !== p.deployment) {
+   return this.syncStop(p, "Keep up to date turned off: Cloudflare shows a version this computer did not publish (another computer, the dashboard or a restore elsewhere). Review the site, then turn it on again.");
+  }
+  let prepared;
+  try {
+   prepared = await this.prepare({ action: "publish", artifactId: p.artifact_id, version: latest, actor: "auto", actorName: "Keep up to date" });
+  } catch (e) {
+   // Token refused, Cloudflare busy or unreachable: the next round retries.
+   if (!(e instanceof RemoteError) || [401, 403, 429].includes(e.status) || e.status >= 500) return;
+   return this.syncFailed(p, latest, e.message);
+  }
+  if (prepared.unchanged) return;
+  await this.confirm(prepared.id, prepared.revision);
+ }
+
+ async fyi(p, title, body) {
+  let workspaceId = "";
+  try {
+   workspaceId = (await this.source(p.artifact_id))?.artifact?.workspaceId || "";
+  } catch {}
+  await this.host("/inbox", 64 << 10, { title: title.slice(0, 200), body: body.slice(0, 1000), workspaceId }).catch(() => {});
+ }
+
+ // One note per distinct reason: a hold repeated every minute stays quiet.
+ async syncHold(p, note) {
+  if (p.sync_note === note) return;
+  this.db.prepare("UPDATE publications SET sync_note=? WHERE id=?").run(note, p.id);
+  await this.event();
+  await this.fyi(p, `Keep up to date is waiting for ${p.title}`, note);
+ }
+ async syncStop(p, note) {
+  this.db.prepare("UPDATE publications SET keep_updated=0,sync_note=?,sync_failed_version=NULL WHERE id=?").run(note, p.id);
+  await this.event();
+  await this.fyi(p, `Keep up to date turned off for ${p.title}`, note);
+ }
+ async syncFailed(p, version, message) {
+  this.db.prepare("UPDATE publications SET sync_failed_version=?,sync_note=? WHERE id=?").run(version, `Version ${version} was not published automatically. ${message}`, p.id);
+  await this.event();
+  await this.fyi(p, `Keep up to date could not publish version ${version} of ${p.title}`, `${message} The site keeps version ${p.version}.`);
+ }
+ // An automatic publish that Cloudflare refused: that version is not tried
+ // again on its own (a newer version or Try again does). An uncertain one
+ // holds at Check result, which blocks every later round for the site.
+ async autoFailed(op) {
+  const p = this.pub(op.publication_id);
+  if (!p) return;
+  if (op.status === "unknown") {
+   await this.fyi(p, `Keep up to date could not confirm version ${op.version} of ${p.title}`, `${op.error || "Cloudflare did not confirm the publication."} The result is uncertain; check it in Sites.`);
+   return;
+  }
+  await this.syncFailed(p, op.version, op.error || "Cloudflare did not complete the publication.");
+ }
+
+ async setKeep(id, on) {
+  const p = this.pub(id);
+  if (!p) throw new RemoteError("The publication was not found.", 404);
+  if (on) throw new RemoteError("Turn Keep up to date on through its confirmation.", 400);
+  this.db.prepare("UPDATE publications SET keep_updated=0,sync_note=NULL,sync_failed_version=NULL WHERE id=?").run(p.id);
+  await this.event();
+  return { keepUpdated: false };
+ }
+ // Try again after a refused automatic publish of the same version.
+ async retrySync(id) {
+  const p = this.pub(id);
+  if (!p || !p.keep_updated) throw new RemoteError("Keep up to date is off for this site.", 409);
+  this.db.prepare("UPDATE publications SET sync_failed_version=NULL,sync_note=NULL WHERE id=?").run(p.id);
+  await this.event();
+  await this.syncRound({ only: p.id });
+  return { retried: true };
+ }
+
+ // D6: domains waiting for DNS or a certificate are read once a minute, ten at a time.
+ async refreshDomains() {
+  const c = await this.readyConfiguration();
+  if (!c) return;
+  const rows = this.db
+   .prepare("SELECT d.* FROM publication_domains d JOIN publications p ON p.id=d.publication_id WHERE d.account_id=? AND p.account_id=? AND p.status='published' AND d.status IN ('initializing','pending') ORDER BY d.checked_at LIMIT 10")
+   .all(c.account, c.account);
+  if (!rows.length) return;
+  const cf = this.remote(c.account, c.token);
+  let changed = false;
+  for (const row of rows) {
+   if (this.closing) return;
+   try {
+    await this.domains.refresh(cf, this.pub(row.publication_id), row);
+    if (this.domains.row(row.account_id, row.hostname)?.status !== row.status) changed = true;
+   } catch (e) {
+    this.recordAuthError(e, c);
+   }
+  }
+  if (changed) await this.event();
+ }
+ // Check now: reads the domain, and asks Cloudflare to validate again when it failed.
+ async checkDomain(publicationId, hostname) {
+  const p = this.pub(publicationId);
+  if (!p) throw new RemoteError("The publication was not found.", 404);
+  const row = this.domains.row(p.account_id, normalizeHostname(hostname));
+  if (!row || row.publication_id !== p.id) throw new RemoteError("This domain is not on this site.", 404);
+  const cf = await this.cloud(p);
+  try {
+   await this.domains.refresh(cf, p, row, true);
+  } catch (e) {
+   this.recordAuthError(e, await this.configuration());
+   throw e;
+  }
+  await this.event();
+  return this.domains.serialize(p, this.domains.row(row.account_id, row.hostname));
+ }
+
+ // D5: cached visits; refreshed when stale (30 minutes) or by Refresh (once a minute).
+ async refreshVisits({ manual = false } = {}) {
+  const c = await this.configuration();
+  const fp = digest(c);
+  if (!c.account || !c.token || (await this.connectionState()).status !== "ready") return this.visits.summary(fp);
+  if (!manual && !this.visits.stale(c.account, fp)) return this.visits.summary(fp);
+  const asked = this.visits.lastQueryAt;
+  await this.visits.refresh(this.remote(c.account, c.token), c.account, fp);
+  // New numbers or a new status: the page reloads its state.
+  if (this.visits.lastQueryAt !== asked) await this.event();
+  return this.visits.summary(fp);
  }
 
  async finishRename(cf, p, op, deployment) {
@@ -1468,6 +1930,8 @@ export class PagesService {
      liveVersion: pub.version || null,
      latestVersion: pub.latestVersion || null,
      access: pub.access_mode,
+     keepUpToDate: pub.keepUpdated,
+     customDomains: pub.domains.filter((d) => d.state === "active").map((d) => d.url),
      otherAccount: pub.otherAccount || undefined,
      operation: latestOp ? { id: latestOp.id, action: latestOp.action, status: latestOp.status, version: latestOp.version, error: latestOp.error || null } : null,
     };
@@ -1508,6 +1972,7 @@ export class PagesService {
     }
     const targetVersion = Number.isInteger(args.version) && args.version >= 1 ? args.version : src?.artifact?.liveVersion;
     if (!targetVersion) return failTool("Artifact has no live version to publish.");
+    const keptBefore = Boolean(live?.keep_updated);
     const prepared = await this.prepare({
      action: "publish",
      artifactId,
@@ -1539,6 +2004,7 @@ export class PagesService {
      return failTool(settled.error || `Publish ended in state ${settled.status}.`);
     }
     const statusWord = settled.status === "published" ? "live" : settled.status;
+    const keepTurnedOff = keptBefore && !pub.keep_updated;
     const out = {
      status: statusWord,
      version: targetVersion,
@@ -1546,9 +2012,11 @@ export class PagesService {
      access: pub.access_mode,
      operationId: settled.id,
      ...(warnMessages.length ? { warnings: warnMessages } : {}),
+     ...(keepTurnedOff ? { keepUpToDate: false } : {}),
     };
     const warnSuffix = warnMessages.length ? ` (${warnMessages.join("; ")})` : "";
-    return okTool(`${statusWord === "live" ? "Published" : "Publishing"} v${targetVersion} at ${out.url}${warnSuffix}`, out);
+    const keepSuffix = keepTurnedOff ? ". Keep up to date was turned off, so the site stays on this older version." : "";
+    return okTool(`${statusWord === "live" ? "Published" : "Publishing"} v${targetVersion} at ${out.url}${warnSuffix}${keepSuffix}`, out);
    }
 
    if (req.tool === "restore") {
@@ -1562,6 +2030,7 @@ export class PagesService {
     if (!existing || existing.status !== "published") {
      return failTool("This artifact has no active published site to restore.");
     }
+    const keptBefore = Boolean(existing.keep_updated);
     const prepared = await this.prepare({
      action: "rollback",
      publicationId: existing.id,
@@ -1576,14 +2045,16 @@ export class PagesService {
      return failTool(settled.error || `Restore ended in state ${settled.status}.`);
     }
     const statusWord = settled.status === "published" ? "live" : settled.status;
+    const keepTurnedOff = keptBefore && !pub.keep_updated;
     const out = {
      status: statusWord,
      version: targetVersion,
      url: pub.url,
      access: pub.access_mode,
      operationId: settled.id,
+     ...(keepTurnedOff ? { keepUpToDate: false } : {}),
     };
-    return okTool(`Restored v${targetVersion} at ${pub.url}`, out);
+    return okTool(`Restored v${targetVersion} at ${pub.url}${keepTurnedOff ? ". Keep up to date was turned off, so the site stays on this version." : ""}`, out);
    }
 
    return failTool(`Unknown tool ${req.tool}. Available tools: sites, publish, status, restore.`);

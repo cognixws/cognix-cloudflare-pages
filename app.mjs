@@ -176,6 +176,14 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && path === "/access/check") return send(200, await service.checkAccessSetup());
   if (req.method === "POST" && path === "/access/verify") return send(200, await service.checkAccess(body.publicationId));
   if (req.method === "GET" && path === "/state") return send(200, await service.state());
+  // 0.6.0: Keep up to date off / Try again, domain Check now, visits Refresh,
+  // and the page's nudge of the background round. Turning Keep up to date on
+  // and every remote change go through /prepare and the owner confirmation.
+  if (req.method === "POST" && path === "/keep") return send(200, await service.setKeep(body.publicationId, body.on === true));
+  if (req.method === "POST" && path === "/keep/retry") return send(202, await service.retrySync(body.publicationId));
+  if (req.method === "POST" && path === "/domains/check") return send(200, await service.checkDomain(body.publicationId, body.hostname));
+  if (req.method === "POST" && path === "/visits/refresh") return send(200, await service.refreshVisits({ manual: true }));
+  if (req.method === "POST" && path === "/sync/check") return send(202, service.nudge());
   const reviewMatch = /^\/artifacts\/([^/]+)\/review$/.exec(path);
   if (reviewMatch && req.method === "GET") {
    const version = Number(u.searchParams.get("version") || 0);
