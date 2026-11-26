@@ -103,4 +103,43 @@ export class Cloudflare {
  // The whole build configuration is sent back so the PATCH cannot drop fields
  // it does not know about; Direct Upload projects only carry analytics fields.
  async setAnalytics(name,buildConfig) {return (await this.call(this.projectPath(name),{method:"PATCH",body:{build_config:buildConfig}})).result;}
+
+ // Custom domains (D6). A Pages domain is keyed by its name, so adding the
+ // same name again cannot create a second one; the DNS record is separate.
+ domainPath(project,name) {return this.projectPath(project)+"/domains"+(name?"/"+encodeURIComponent(name):"");}
+ async getDomain(project,name) {try{return (await this.call(this.domainPath(project,name))).result;}catch(e){if(e.status===404)return null;throw e;}}
+ async addDomain(project,name) {return (await this.call(this.domainPath(project),{method:"POST",body:{name}})).result;}
+ async retryDomain(project,name) {return (await this.call(this.domainPath(project,name),{method:"PATCH"})).result;}
+ async removeDomain(project,name) {try{await this.call(this.domainPath(project,name),{method:"DELETE"});}catch(e){if(e.status!==404)throw e;}}
+ // The zone of this account that holds the name, most specific first. The
+ // name itself is tried too, so an apex is recognised and refused.
+ async findZone(hostname) {
+  const labels=hostname.split(".");
+  for(let i=0;i<=labels.length-2;i++) {
+   const name=labels.slice(i).join(".");
+   const r=await this.call(`/zones?name=${encodeURIComponent(name)}&account.id=${this.account}&per_page=5`);
+   const zone=(r.result||[]).find(z=>z?.name===name&&z.id);
+   if(zone)return {id:zone.id,name:zone.name};
+  }
+  return null;
+ }
+ async dnsRecords(zone,name) {return (await this.call(`/zones/${encodeURIComponent(zone)}/dns_records?name.exact=${encodeURIComponent(name)}&per_page=20`)).result||[];}
+ async getDnsRecord(zone,id) {try{return (await this.call(`/zones/${encodeURIComponent(zone)}/dns_records/${encodeURIComponent(id)}`)).result;}catch(e){if(e.status===404)return null;throw e;}}
+ async createDnsRecord(zone,record) {return (await this.call(`/zones/${encodeURIComponent(zone)}/dns_records`,{method:"POST",body:record})).result;}
+ async deleteDnsRecord(zone,id) {try{await this.call(`/zones/${encodeURIComponent(zone)}/dns_records/${encodeURIComponent(id)}`,{method:"DELETE"});}catch(e){if(e.status!==404)throw e;}}
+
+ // GraphQL Analytics (D5). It answers 200 with an errors array, not the v4
+ // envelope; provider messages are classified, never reflected.
+ async graphql(query) {
+  let res;
+  try {res=await this.transport(this.apiBase+"/graphql",{method:"POST",body:JSON.stringify({query}),headers:{Authorization:"Bearer "+this.token,"Content-Type":"application/json"},redirect:"error",signal:AbortSignal.timeout(30_000)});}
+  catch {throw new RemoteError("Cloudflare did not answer the visits query.");}
+  let data;try{data=await res.json();}catch{throw new RemoteError("Cloudflare returned an unreadable visits answer.");}
+  const errors=Array.isArray(data?.errors)?data.errors:[];
+  const text=errors.map(e=>String(e?.message||"")).join(" ");
+  if(res.status===401||res.status===403||/not authori[sz]ed|unauthori[sz]ed|authentication/i.test(text))throw new RemoteError("Visits need Account Analytics: Read on the token.",403);
+  if(/does not have access to the path/i.test(text))throw new RemoteError("Cloudflare does not offer these visit counts for this account.",409);
+  if(!res.ok||errors.length||!data?.data)throw new RemoteError("Cloudflare could not answer the visits query.",res.status===429?429:502);
+  return data.data;
+ }
 }

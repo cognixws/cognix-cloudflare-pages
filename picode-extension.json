@@ -1,10 +1,10 @@
 {
   "id": "cloudflare-pages",
   "name": "Cloudflare Pages",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "apiVersion": 26,
   "publisher": "COGNIX[WS]",
-  "description": "Publish standalone page and design artifacts as Cloudflare Pages sites with public or email-restricted access, Web Analytics, version restore and agent publishing tools.",
+  "description": "Publish standalone page and design artifacts as Cloudflare Pages sites with public or email-restricted access, custom subdomains, 7-day visits, Keep up to date, version restore and agent publishing tools.",
   "outsideEffects": true,
   "process": {
     "command": "node",
@@ -34,7 +34,7 @@
       "label": "Cloudflare API token",
       "type": "secret",
       "required": true,
-      "description": "Create a token with Cloudflare Pages: Edit, Account Settings: Edit and Account Analytics: Read."
+      "description": "Create a token with Cloudflare Pages: Edit, Account Settings: Edit and Account Analytics: Read. Optional, for custom domains in your own zones: Zone: DNS Edit and Zone: Zone Read."
     },
     {
       "key": "access_api_token",
